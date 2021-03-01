@@ -1,3 +1,3 @@
-# bert_phoneme_CN_Taco2
+# bWisdomTeeth-Tacotron
 An implementation of Tacotron2 basd Pytorch
 
