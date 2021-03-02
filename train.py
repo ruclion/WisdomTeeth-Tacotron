@@ -5,7 +5,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from models import Tacotron2
-from data_utils import TextMelLoader
+from dataset import TextMelLoader
 
 from hparams import hparams
 
@@ -186,6 +186,7 @@ def train_tacotron():
             # logs
             print("Train loss {} {:.6f} Grad Norm {:.6f} {:.2f}s/it".format(iteration, reduced_loss, grad_norm, time.perf_counter() - start))
             iteration += 1
+            
                 
         # after 1 epoch
         validate(model, loss_f, val_loader, epoch) 
