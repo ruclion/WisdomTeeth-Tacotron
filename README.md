@@ -1,3 +1,3 @@
-# bWisdomTeeth-Tacotron
+# WisdomTeeth-Tacotron
 An implementation of Tacotron2 basd Pytorch
 

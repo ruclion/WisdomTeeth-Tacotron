@@ -5,7 +5,7 @@ from hparams import hparams
 
 
 
-# init初始化, 不知有啥用 --Linear
+# init初始化, 这就叫 Norm? Tacotron 要求的? 不知有啥用 --Linear
 class Linear_init(torch.nn.Module):
     def __init__(self, in_dim, out_dim, bias, w_init_gain):
         super(Linear_init, self).__init__()
@@ -18,7 +18,7 @@ class Linear_init(torch.nn.Module):
 
 
 
-# init初始化, 不知有啥用 --CNN
+# init初始化, 这就叫 Norm? Tacotron 要求的? 不知有啥用 --CNN
 class Conv1d_init(torch.nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride, padding, bias, w_init_gain):
         super(Conv1d_init, self).__init__()
@@ -144,16 +144,27 @@ class Attention(nn.Module):
 
 
 class Prenet(nn.Module):
-    def __init__(self, in_dim, sizes):
+    def __init__(self, mel_dim, prenet_dim, dropout_p): # mel_dim=80, prenet_dim=[256, 256]
         super(Prenet, self).__init__()
-        in_sizes = [in_dim] + sizes[:-1]
-        self.layers = nn.ModuleList(
-            [LinearNorm(in_size, out_size, bias=False)
-             for (in_size, out_size) in zip(in_sizes, sizes)])
+        self.pre1 = Linear_init(in_dim=mel_dim, out_dim=prenet_dim[0], bias=False, w_init_gain='linear')
+        self.relu1 = nn.ReLU()
+        self.drop1 = nn.Dropout(p=dropout_p)
+
+
+        self.pre2 = Linear_init(in_dim=prenet_dim[0], out_dim=prenet_dim[1], bias=False, w_init_gain='linear')
+        self.relu2 = nn.ReLU()
+        self.drop2 = nn.Dropout(p=dropout_p)
+
 
     def forward(self, x):
-        for linear in self.layers:
-            x = F.dropout(F.relu(linear(x)), p=0.5, training=True)
+        x = self.pre1(x)
+        x = self.relu1(x)
+        x = self.drop1(x)
+
+
+        x = self.pre2(x)
+        x = self.relu2(x)
+        x = self.drop2(x)
         return x
 
 
@@ -268,15 +279,16 @@ class Decoder(nn.Module):
         self.prenet_dim = hparams.prenet_dim
         self.max_decoder_steps = hparams.max_decoder_steps
         self.gate_threshold = hparams.gate_threshold
-        self.p_attention_dropout = hparams.p_attention_dropout
-        self.p_decoder_dropout = hparams.p_decoder_dropout
 
-        self.prenet = Prenet(
-            hparams.n_mel_channels * hparams.n_frames_per_step,
-            [hparams.prenet_dim, hparams.prenet_dim])
+        self.prenet_dropout_p = hparams.prenet_dropout_p
+        self.attention_dropout_p = hparams.attention_dropout_p
+        self.decoder_dropout_p = hparams.p_decoder_dropout
+
+        # 和 r9y9 的不同, 和论文以及 Rayhane 的一致
+        self.prenet = Prenet(mel_dim=self.n_mel_channels, prenet_dim=self.prenet_dim, dropout_p=self.prenet_dropout_p)
 
         self.attention_rnn = nn.LSTMCell(
-            hparams.prenet_dim + hparams.encoder_embedding_dim,
+            hparams.prenet_dim[-1] + hparams.encoder_embedding_dim,
             hparams.attention_rnn_dim)
 
         # def __init__(self, attention_rnn_dim, embedding_dim, attention_dim, location_n_filters, location_kernel_size)
@@ -413,7 +425,7 @@ class Decoder(nn.Module):
         self.attention_hidden, self.attention_cell = self.attention_rnn(
             cell_input, (self.attention_hidden, self.attention_cell))
         self.attention_hidden = F.dropout(
-            self.attention_hidden, self.p_attention_dropout, self.training)
+            self.attention_hidden, self.attention_dropout_p, self.training)
 
 
         attention_weights_cat = torch.cat((self.attention_weights.unsqueeze(1), self.attention_weights_cum.unsqueeze(1)), dim=1)
@@ -434,7 +446,7 @@ class Decoder(nn.Module):
         self.decoder_hidden, self.decoder_cell = self.decoder_rnn(
             decoder_input, (self.decoder_hidden, self.decoder_cell))
         self.decoder_hidden = F.dropout(
-            self.decoder_hidden, self.p_decoder_dropout, self.training)
+            self.decoder_hidden, self.decoder_dropout_p, self.training)
 
         decoder_hidden_context = torch.cat(
             (self.decoder_hidden, now_context), dim=1)
