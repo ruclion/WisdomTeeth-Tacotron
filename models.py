@@ -259,7 +259,7 @@ class Encoder(nn.Module):
 
 
         self.lstm = nn.LSTM(input_size=hparams.encoder_output_dim[-1], 
-                            hidden_size=int(hparams.encoder_embedding_dim / 2), 
+                            hidden_size=int(hparams.encoder_output_dim[-1] / 2), 
                             num_layers=1, 
                             batch_first=True, 
                             bidirectional=True)
@@ -308,6 +308,7 @@ class Decoder(nn.Module):
         self.attention_rnn_dim = hparams.attention_rnn_dim # 和 attention 模块共用这个参数
         self.attention_rnn_dropout_p = hparams.attention_rnn_dropout_p # 0.1, attention_rnn 用的
         self.final_encoder_output_dim = hparams.encoder_output_dim[-1] # 和 encoder 模块共用这个参数, prenet_out 和 context 会拼接
+        assert hparams.encoder_output_dim[-1] == hparams.encoder_embedding_dim
 
         self.decoder_rnn_dim = hparams.decoder_rnn_dim # 比 Rayhane 多一个 decoder rnn, 1 + 1 模式
         self.decoder_rnn_dropout_p = hparams.decoder_rnn_dropout_p # 0.1, decoder_rnn 用的
