@@ -4,6 +4,13 @@ from hparams import hparams
 # from torch.nn import functional as F
 
 
+def get_mask_from_lengths(lengths):
+    max_len = torch.max(lengths).item()
+    ids = torch.arange(0, max_len, out=torch.cuda.LongTensor(max_len))
+    mask = (ids < lengths.unsqueeze(1)).bool()
+    return mask
+
+
 
 # init初始化, 这就叫 Norm? Tacotron 要求的? 不知有啥用 --Linear
 class Linear_init(torch.nn.Module):
@@ -327,7 +334,7 @@ class Decoder(nn.Module):
 
         # attention_rnn
         self.attention_rnn = nn.LSTMCell(input_size =self.prenet_dim[-1] + self.final_encoder_output_dim, hidden_size =self.attention_rnn_dim)
-
+        self.attention_rnn_drop = nn.Dropout(p=self.attention_rnn_dropout_p)
 
         # attention
         # def __init__(self, attention_rnn_dim, embedding_dim, attention_dim, location_n_filters, location_kernel_size)
@@ -346,7 +353,7 @@ class Decoder(nn.Module):
         # decoder_rnn
         # 和之前的不一样
         self.decoder_rnn = nn.LSTMCell(input_size=self.attention_dim + self.final_encoder_output_dim, hidden_size=hparams.decoder_rnn_dim)
-
+        self.decoder_rnn_drop = nn.Dropout(p=self.decoder_rnn_dropout_p)
 
         # FC
         # def __init__(self, in_dim, out_dim, bias, w_init_gain):
@@ -372,37 +379,25 @@ class Decoder(nn.Module):
         
 
     def initialize_decoder_states(self, memory, mask_seq):
-        """ Initializes attention rnn states, decoder rnn states, attention
-        weights, attention cumulative weights, attention context, stores memory
-        and stores processed memory
-        PARAMS
-        ------
-        memory: Encoder outputs
-        mask: Mask for padded data if training, expects None for inference
-        """
         B = memory.size(0)
-        MAX_TIME = memory.size(1)
+        Text_length = memory.size(1)
 
-        self.attention_hidden = Variable(memory.data.new(
-            B, self.attention_rnn_dim).zero_())
-        self.attention_cell = Variable(memory.data.new(
-            B, self.attention_rnn_dim).zero_())
+        # 开始初始化
+        self.attention_rnn_hidden = torch.zeros((B, self.attention_rnn_dim), dtype=memory.dtype)
+        self.attention_rnn_cell = torch.zeros((B, self.attention_rnn_dim), dtype=memory.dtype)
 
-        self.decoder_hidden = Variable(memory.data.new(
-            B, self.decoder_rnn_dim).zero_())
-        self.decoder_cell = Variable(memory.data.new(
-            B, self.decoder_rnn_dim).zero_())
+        self.decoder_rnn_hidden = torch.zeros((B, self.decoder_rnn_dim), dtype=memory.dtype)
+        self.decoder_rnn_cell =torch.zeros((B, self.decoder_rnn_dim), dtype=memory.dtype)
 
-        self.attention_weights = Variable(memory.data.new(
-            B, MAX_TIME).zero_())
-        self.attention_weights_cum = Variable(memory.data.new(
-            B, MAX_TIME).zero_())
-        self.attention_context = Variable(memory.data.new(
-            B, self.encoder_embedding_dim).zero_())
+        self.attention_weights = torch.zeros((B, Text_length), dtype=memory.dtype)
+        self.attention_weights_cum = torch.zeros((B, Text_length), dtype=memory.dtype)
+        self.context = torch.zeros((B, self.final_encoder_output_dim), dtype=memory.dtype)
 
         self.memory = memory
         self.processed_memory = self.attention_module.memory_linear(memory)
-        self.mask = mask
+        self.mask = mask_seq
+
+
 
     def parse_decoder_inputs(self, decoder_inputs):
         """ Prepares decoder inputs, i.e. mel outputs
@@ -415,6 +410,9 @@ class Decoder(nn.Module):
         inputs: processed decoder inputs
 
         """
+        # 先只考虑 reduce factor 为 1 的时候
+        assert self.n_frames_per_step == 1
+
         # (B, n_mel_channels, T_out) -> (B, T_out, n_mel_channels)
         decoder_inputs = decoder_inputs.transpose(1, 2)
         decoder_inputs = decoder_inputs.reshape(
@@ -438,17 +436,21 @@ class Decoder(nn.Module):
         gate_outpust: gate output energies
         alignments:
         """
+         # 先只考虑 reduce factor 为 1 的时候
+        assert self.n_frames_per_step == 1
+
         # (T_out, B) -> (B, T_out)
         alignments = torch.stack(alignments).transpose(0, 1)
         # (T_out, B) -> (B, T_out)
-        gate_outputs = torch.stack(gate_outputs).transpose(0, 1)
-        gate_outputs = gate_outputs.contiguous()
+        gate_outputs = torch.stack(gate_outputs).transpose(0, 1).contiguous()
+
+        # 中间有 0 咋办?
         gate_outputs = gate_outputs.repeat_interleave(self.n_frames_per_step, 1)
+
         # (T_out, B, n_mel_channels) -> (B, T_out, n_mel_channels)
         mel_outputs = torch.stack(mel_outputs).transpose(0, 1).contiguous()
         # decouple frames per step
-        mel_outputs = mel_outputs.view(
-            mel_outputs.size(0), -1, self.n_mel_channels)
+        mel_outputs = mel_outputs.view(mel_outputs.size(0), -1, self.n_mel_channels)
         # (B, T_out, n_mel_channels) -> (B, n_mel_channels, T_out)
         mel_outputs = mel_outputs.transpose(1, 2)
 
@@ -467,18 +469,17 @@ class Decoder(nn.Module):
         attention_weights:
         """
         cell_input = torch.cat((decoder_input, self.context), -1)
-        self.attention_hidden, self.attention_cell = self.attention_rnn(
-            cell_input, (self.attention_hidden, self.attention_cell))
-        self.attention_hidden = F.dropout(
-            self.attention_hidden, self.attention_dropout_p, self.training)
+        self.new_attention_rnn_hidden, self.new_attention_rnn_cell = self.attention_rnn(cell_input, (self.attention_rnn_hidden, self.attention_rnn_cell))
+        self.new_attention_rnn_hidden = self.attention_rnn_drop(self.new_attention_rnn_hidden)
+
 
 
         attention_weights_cat = torch.cat((self.attention_weights.unsqueeze(1), self.attention_weights_cum.unsqueeze(1)), dim=1)
 
 
         # def forward(self, attention_rnn_last_output, memory, processed_memory, attention_weights_cat, mask_seq):
-        now_context, now_attention_weights = self.attention_module(
-            attention_rnn_last_output=self.attention_hidden, 
+        new_context, new_attention_weights = self.attention_module(
+            attention_rnn_last_output=self.new_attention_rnn_hidden, 
             memory=self.memory, 
             processed_memory=self.processed_memory,
             attention_weights_cat=attention_weights_cat, 
@@ -486,30 +487,34 @@ class Decoder(nn.Module):
 
 
 
-        decoder_input = torch.cat(
-            (self.attention_hidden, now_context), -1)
-        self.decoder_hidden, self.decoder_cell = self.decoder_rnn(
-            decoder_input, (self.decoder_hidden, self.decoder_cell))
-        self.decoder_hidden = F.dropout(
-            self.decoder_hidden, self.decoder_dropout_p, self.training)
+        decoder_input = torch.cat((self.new_attention_rnn_hidden, new_context), -1)
 
-        decoder_hidden_context = torch.cat(
-            (self.decoder_hidden, now_context), dim=1)
-        decoder_output = self.linear_projection(
-            decoder_hidden_context)
+        self.new_decoder_hidden, self.new_decoder_cell = self.decoder_rnn(decoder_input, (self.decoder_hidden, self.decoder_cell))
+        self.new_decoder_hidden = self.decoder_rnn_drop(self.new_decoder_hidden)
+
+        new_decoder_hidden_context = torch.cat((self.new_decoder_hidden, new_context), dim=1)
+        new_decoder_output = self.linear_projection(new_decoder_hidden_context)
 
 
         # 特别为了 gate-stop 的预测增加了 attention_weights, 防止过早于 mel 谱的 early-stop
-        decoder_hidden_context_attention_weights = torch.cat(
-            (self.decoder_hidden, now_context, now_attention_weights), dim=1)
-        gate_prediction = self.gate_layer(decoder_hidden_context_attention_weights)
+        new_decoder_hidden_context_attention_weights = torch.cat((self.new_decoder_hidden, new_context, new_attention_weights), dim=1)
+        new_gate_prediction = self.gate_layer(new_decoder_hidden_context_attention_weights)
 
 
-        self.context = now_context
-        self.attention_weights = now_attention_weights
-        self.attention_weights_cum += now_context
+        # [1]
+        self.attention_rnn_hidden = self.new_attention_rnn_hidden
+        self.attention_rnn_cell = self.new_attention_rnn_cell
 
-        return decoder_output, gate_prediction, now_attention_weights
+        # [2]
+        self.decoder_rnn_hidden = self.new_decoder_hidden
+        self.decoder_rnn_cell = self.new_decoder_rnn_cell
+
+        # [3]
+        self.context = new_context
+        self.attention_weights = new_attention_weights
+        self.attention_weights_cum += new_context
+
+        return new_decoder_output, new_gate_prediction, new_attention_weights
 
     def forward(self, memory, decoder_inputs, memory_lengths):
         """ Decoder forward pass for training
@@ -531,20 +536,23 @@ class Decoder(nn.Module):
         decoder_inputs = torch.cat((decoder_input, decoder_inputs), dim=0)
         decoder_inputs = self.prenet(decoder_inputs)
 
-        self.initialize_decoder_states(
-            memory, mask=~get_mask_from_lengths(memory_lengths))
+        # 对输入进行, 但是 mask 取反感觉错误了
+        self.initialize_decoder_states(memory, mask_seq=~get_mask_from_lengths(memory_lengths))
+        print(~get_mask_from_lengths(memory_lengths))
+        assert False
 
         mel_outputs, gate_outputs, alignments = [], [], []
         while len(mel_outputs) < decoder_inputs.size(0) - 1:
             decoder_input = decoder_inputs[len(mel_outputs)]
-            mel_output, gate_output, attention_weights = self.decode(
-                decoder_input)
+            mel_output, gate_output, attention_weights = self.decode(decoder_input)
+
+            # add List
             mel_outputs += [mel_output.squeeze(1)]
             gate_outputs += [gate_output.squeeze(1)]
             alignments += [attention_weights]
 
-        mel_outputs, gate_outputs, alignments = self.parse_decoder_outputs(
-            mel_outputs, gate_outputs, alignments)
+        # alignments 就是 attention_weights 的图
+        mel_outputs, gate_outputs, alignments = self.parse_decoder_outputs(mel_outputs, gate_outputs, alignments)
 
         return mel_outputs, gate_outputs, alignments
 
@@ -562,7 +570,7 @@ class Decoder(nn.Module):
         """
         decoder_input = self.get_go_frame(memory)
 
-        self.initialize_decoder_states(memory, mask=None)
+        self.initialize_decoder_states(memory, mask_seq=None)
 
         mel_outputs, gate_outputs, alignments = [], [], []
         while True:

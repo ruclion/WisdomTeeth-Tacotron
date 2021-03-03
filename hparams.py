@@ -22,7 +22,7 @@ class hparams:
 
 
         # Attention-Decoder parameters
-        n_frames_per_step=3
+        n_frames_per_step=1
 
         attention_rnn_dim=1024
         attention_rnn_dropout_p=0.1
