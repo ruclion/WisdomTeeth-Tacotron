@@ -20,7 +20,7 @@ class hparams:
         # Audio Parameters             #
         ################################
         
-        # null
+        n_mel_channels = 80
 
         ################################
         # Model Parameters             #
@@ -54,9 +54,12 @@ class hparams:
         location_kernel_size=31
 
         # Mel-post processing network parameters
-        postnet_embedding_dim=512
+        postnet_num_convolutions=5
+        postnet_embedding_dim_in=[80, 512, 512, 512, 512]
+        postnet_embedding_dim_out=[512, 512, 512, 512, 80]
         postnet_kernel_size=5
-        postnet_n_convolutions=5
+        
+
 
         ################################
         # Optimization Hyperparameters #

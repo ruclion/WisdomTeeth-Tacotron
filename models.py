@@ -19,6 +19,7 @@ class Linear_init(torch.nn.Module):
 
 
 # init初始化, 这就叫 Norm? Tacotron 要求的? 不知有啥用 --CNN
+# -> (B, channel=32, Text_length)
 class Conv1d_init(torch.nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride, padding, bias, w_init_gain):
         super(Conv1d_init, self).__init__()
@@ -168,14 +169,23 @@ class Prenet(nn.Module):
         return x
 
 
-class Postnet(nn.Module):
-    """Postnet
-        - Five 1-d convolution with 512 channels and kernel size 5
-    """
 
+class Postnet(nn.Module):
     def __init__(self, hparams):
         super(Postnet, self).__init__()
-        self.convolutions = nn.ModuleList()
+        # 5层 CNN
+        self.postnet_num_convolutions = hparams.postnet_num_convolutions # 5
+        self.postnet_embedding_dim_in = hparams.postnet_embedding_dim_in # [80, 512, 512, 512]
+        self.postnet_embedding_dim_out = hparams.postnet_embedding_dim_out # [512, 512, 512, 512]
+        self.final_postnet_embedding_dim_in = hparams.final_postnet_embedding_dim_in # 512
+        self.final_postnet_embedding_dim_out = hparams.final_postnet_embedding_dim_out # 80
+        assert self.postnet_num_convolutions - 1 == len(self.postnet_embedding_dim_in)
+        # kernel size
+        self.postnet_kernel_size = hparams.postnet_kernel_size
+        # drop_p
+        self.postnet_dropout_p = hparams.postnet_dropout_p
+        # List 的方式搭建
+        self.convolution_list = nn.ModuleList()
 
         self.convolutions.append(
             nn.Sequential(
@@ -186,31 +196,42 @@ class Postnet(nn.Module):
                 nn.BatchNorm1d(hparams.postnet_embedding_dim))
         )
 
-        for i in range(1, hparams.postnet_n_convolutions - 1):
-            self.convolutions.append(
+        for i in range(0, hparams.self.postnet_num_convolutions - 1):
+            self.convolution_list.append(
                 nn.Sequential(
-                    ConvNorm(hparams.postnet_embedding_dim,
-                             hparams.postnet_embedding_dim,
-                             kernel_size=hparams.postnet_kernel_size, stride=1,
-                             padding=int((hparams.postnet_kernel_size - 1) / 2),
-                             dilation=1, w_init_gain='tanh'),
-                    nn.BatchNorm1d(hparams.postnet_embedding_dim))
+                    # def __init__(self, in_channels, out_channels, kernel_size, stride, padding, bias, w_init_gain):
+                    Conv1d_init(in_channels=self.postnet_embedding_dim_in[i],
+                                out_channels=self.postnet_embedding_dim_out[i],
+                                kernel_size=hparams.postnet_kernel_size,
+                                stride=1,
+                                padding=int((self.postnet_kernel_size - 1) / 2),
+                                bias=True,
+                                w_init_gain='tanh'),
+                    nn.BatchNorm1d(self.postnet_embedding_dim_out[i])),
+                    nn.Tanh(),
+                    nn.Dropout(p=self.postnet_dropout_p),
             )
 
-        self.convolutions.append(
-            nn.Sequential(
-                ConvNorm(hparams.postnet_embedding_dim, hparams.n_mel_channels,
-                         kernel_size=hparams.postnet_kernel_size, stride=1,
-                         padding=int((hparams.postnet_kernel_size - 1) / 2),
-                         dilation=1, w_init_gain='linear'),
-                nn.BatchNorm1d(hparams.n_mel_channels))
-            )
+        self.convolution_list.append(
+                nn.Sequential(
+                    # def __init__(self, in_channels, out_channels, kernel_size, stride, padding, bias, w_init_gain):
+                    Conv1d_init(in_channels=self.final_postnet_embedding_dim_in,
+                                out_channels=self.final_postnet_embedding_dim_out,
+                                kernel_size=hparams.postnet_kernel_size,
+                                stride=1,
+                                padding=int((self.postnet_kernel_size - 1) / 2),
+                                bias=True,
+                                w_init_gain='linear'),
+                    # nn.BatchNorm1d(self.postnet_embedding_dim_out[i])),
+                    # nn.Tanh(),
+                    nn.Dropout(p=self.postnet_dropout_p),
+                )
+        )
+
 
     def forward(self, x):
-        for i in range(len(self.convolutions) - 1):
-            x = F.dropout(torch.tanh(self.convolutions[i](x)), 0.5, self.training)
-        x = F.dropout(self.convolutions[-1](x), 0.5, self.training)
-
+        for i in range(self.postnet_num_convolutions):
+            x = self.convolution_list[i](x)
         return x
 
 
