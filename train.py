@@ -122,7 +122,7 @@ def train_tacotron():
         checkpoint_dict = torch.load(checkpoint_path)
         model.load_state_dict(checkpoint_dict['state_dict'])
         optimizer.load_state_dict(checkpoint_dict['optimizer_state_dict'])
-        epoch = checkpoint_dict['epoch']
+        aready_epoch = checkpoint_dict['epoch']
         # learning_rate = checkpoint_dict['learning_rate']
         
 
@@ -130,13 +130,13 @@ def train_tacotron():
         # if hparams.use_saved_learning_rate:
         #     learning_rate = _learning_rate
     else:
-        epoch = 0
+        aready_epoch = 0
             
 
     # iteration
     model.train()
     iteration = 0
-    for epoch in range(epoch, hparams.epochs):
+    for epoch in range(aready_epoch, hparams.epochs):
         print("Epoch: {}".format(epoch))
         for i, batch in enumerate(train_loader):
             # time

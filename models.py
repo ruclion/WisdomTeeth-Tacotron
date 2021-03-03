@@ -294,65 +294,83 @@ class Encoder(nn.Module):
         return outputs
 
 
+
+
 class Decoder(nn.Module):
     def __init__(self, hparams):
         super(Decoder, self).__init__()
-        self.n_mel_channels = hparams.n_mel_channels
+        # reduce factor
+        self.n_mel_channels = hparams.n_mel_channels # 和 audio 模块共用这个参数
         self.n_frames_per_step = hparams.n_frames_per_step
-        self.encoder_embedding_dim = hparams.encoder_embedding_dim
-        self.attention_rnn_dim = hparams.attention_rnn_dim
-        self.decoder_rnn_dim = hparams.decoder_rnn_dim
-        self.prenet_dim = hparams.prenet_dim
-        self.max_decoder_steps = hparams.max_decoder_steps
-        self.gate_threshold = hparams.gate_threshold
 
-        self.prenet_dropout_p = hparams.prenet_dropout_p
-        self.attention_dropout_p = hparams.attention_dropout_p
-        self.decoder_dropout_p = hparams.p_decoder_dropout
 
-        # 和 r9y9 的不同, 和论文以及 Rayhane 的一致
+        # 两个 rnn 和两层 prenet
+        self.attention_rnn_dim = hparams.attention_rnn_dim # 和 attention 模块共用这个参数
+        self.attention_rnn_dropout_p = hparams.attention_rnn_dropout_p # 0.1, attention_rnn 用的
+        self.final_encoder_output_dim = hparams.encoder_output_dim[-1] # 和 encoder 模块共用这个参数, prenet_out 和 context 会拼接
+
+        self.decoder_rnn_dim = hparams.decoder_rnn_dim # 比 Rayhane 多一个 decoder rnn, 1 + 1 模式
+        self.decoder_rnn_dropout_p = hparams.decoder_rnn_dropout_p # 0.1, decoder_rnn 用的
+
+        self.prenet_dim = hparams.prenet_dim # [256, 256]
+        self.prenet_dropout_p = hparams.prenet_dropout_p # 0.5, prenet 用的
+
+        # stop
+        self.max_decoder_steps = hparams.max_decoder_steps # 1000
+        self.gate_threshold = hparams.gate_threshold # 0.5
+        
+
+        # prenet, 和 r9y9 的不同, 和论文以及 Rayhane 的一致: 不管 reduce factor 只用最后一帧
         self.prenet = Prenet(mel_dim=self.n_mel_channels, prenet_dim=self.prenet_dim, dropout_p=self.prenet_dropout_p)
 
-        self.attention_rnn = nn.LSTMCell(
-            hparams.prenet_dim[-1] + hparams.encoder_embedding_dim,
-            hparams.attention_rnn_dim)
 
+        # attention_rnn
+        self.attention_rnn = nn.LSTMCell(input_size =self.prenet_dim[-1] + self.final_encoder_output_dim, hidden_size =self.attention_rnn_dim)
+
+
+        # attention
         # def __init__(self, attention_rnn_dim, embedding_dim, attention_dim, location_n_filters, location_kernel_size)
+        self.attention_dim = hparams.attention_dim
+        self.location_n_filters = hparams.location_n_filters
+        self.location_kernel_size = hparams.location_kernel_size
+
         self.attention_module = Attention(
-                                attention_rnn_dim=hparams.attention_rnn_dim, 
-                                embedding_dim=hparams.encoder_output_dim[-1],
-                                attention_dim=hparams.attention_dim, 
-                                location_n_filters=hparams.location_n_filters,
-                                location_kernel_size=hparams.location_kernel_size)
+                                attention_rnn_dim=self.attention_rnn_dim, 
+                                embedding_dim=self.final_encoder_output_dim,
+                                attention_dim=self.attention_dim, 
+                                location_n_filters=self.location_n_filters,
+                                location_kernel_size=self.location_kernel_size)
 
-        self.decoder_rnn = nn.LSTMCell(
-            hparams.attention_rnn_dim + hparams.encoder_embedding_dim,
-            hparams.decoder_rnn_dim, 1)
 
-        self.linear_projection = LinearNorm(
-            hparams.decoder_rnn_dim + hparams.encoder_embedding_dim,
-            hparams.n_mel_channels * hparams.n_frames_per_step)
+        # decoder_rnn
+        # 和之前的不一样
+        self.decoder_rnn = nn.LSTMCell(input_size=self.attention_dim + self.final_encoder_output_dim, hidden_size=hparams.decoder_rnn_dim)
 
-        self.gate_layer = LinearNorm(
-            hparams.decoder_rnn_dim + hparams.encoder_embedding_dim, 1,
-            bias=True, w_init_gain='sigmoid')
+
+        # FC
+        # def __init__(self, in_dim, out_dim, bias, w_init_gain):
+        self.linear_projection = Linear_init(in_dim=self.decoder_rnn_dim + self.final_encoder_output_dim,
+                                             out_dim=self.n_mel_channels * self.n_frames_per_step,
+                                             bias=True,
+                                             w_init_gain='linear')
+
+        self.gate_layer = Linear_init(in_dim=self.decoder_rnn_dim + self.encoder_embedding_dim,
+                                      out_dim=1,
+                                      bias=True, 
+                                      w_init_gain='sigmoid')
+
+
 
     def get_go_frame(self, memory):
-        """ Gets all zeros frames to use as first decoder input
-        PARAMS
-        ------
-        memory: decoder outputs
-
-        RETURNS
-        -------
-        decoder_input: all zeros frames
-        """
         B = memory.size(0)
-        decoder_input = Variable(memory.data.new(
-            B, self.n_mel_channels * self.n_frames_per_step).zero_())
+
+        # (B, 80) 只用一帧作为查询
+        decoder_input = torch.zeros((B, self.n_mel_channels), dtype=memory.dtype)
         return decoder_input
 
-    def initialize_decoder_states(self, memory, mask):
+        
+
+    def initialize_decoder_states(self, memory, mask_seq):
         """ Initializes attention rnn states, decoder rnn states, attention
         weights, attention cumulative weights, attention context, stores memory
         and stores processed memory
