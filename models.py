@@ -179,7 +179,7 @@ class Postnet(nn.Module):
         self.postnet_embedding_dim_out = hparams.postnet_embedding_dim_out # [512, 512, 512, 512]
         self.final_postnet_embedding_dim_in = hparams.final_postnet_embedding_dim_in # 512
         self.final_postnet_embedding_dim_out = hparams.final_postnet_embedding_dim_out # 80
-        assert self.postnet_num_convolutions - 1 == len(self.postnet_embedding_dim_in)
+        assert self.postnet_num_convolutions - 1 == len(self.postnet_embedding_dim_in) # 最后一层单独写 final
         # kernel size
         self.postnet_kernel_size = hparams.postnet_kernel_size
         # drop_p
@@ -187,19 +187,10 @@ class Postnet(nn.Module):
         # List 的方式搭建
         self.convolution_list = nn.ModuleList()
 
-        self.convolutions.append(
-            nn.Sequential(
-                ConvNorm(hparams.n_mel_channels, hparams.postnet_embedding_dim,
-                         kernel_size=hparams.postnet_kernel_size, stride=1,
-                         padding=int((hparams.postnet_kernel_size - 1) / 2),
-                         dilation=1, w_init_gain='tanh'),
-                nn.BatchNorm1d(hparams.postnet_embedding_dim))
-        )
 
         for i in range(0, hparams.self.postnet_num_convolutions - 1):
             self.convolution_list.append(
                 nn.Sequential(
-                    # def __init__(self, in_channels, out_channels, kernel_size, stride, padding, bias, w_init_gain):
                     Conv1d_init(in_channels=self.postnet_embedding_dim_in[i],
                                 out_channels=self.postnet_embedding_dim_out[i],
                                 kernel_size=hparams.postnet_kernel_size,
@@ -214,7 +205,6 @@ class Postnet(nn.Module):
 
         self.convolution_list.append(
                 nn.Sequential(
-                    # def __init__(self, in_channels, out_channels, kernel_size, stride, padding, bias, w_init_gain):
                     Conv1d_init(in_channels=self.final_postnet_embedding_dim_in,
                                 out_channels=self.final_postnet_embedding_dim_out,
                                 kernel_size=hparams.postnet_kernel_size,
@@ -235,55 +225,70 @@ class Postnet(nn.Module):
         return x
 
 
+
+
 class Encoder(nn.Module):
-    """Encoder module:
-        - Three 1-d convolution banks
-        - Bidirectional LSTM
-    """
     def __init__(self, hparams):
         super(Encoder, self).__init__()
+        self.encoder_embedding_dim = hparams.encoder_embedding_dim # 512
+        self.encoder_n_convolutions = hparams.encoder_n_convolutions # 3
+        self.encoder_input_dim = hparams.encoder_input_dim # [512, 512, 512]
+        self.encoder_output_dim = hparams.encoder_output_dim # [512, 512, 512]
+        assert self.encoder_embedding_dim == self.encoder_input_dim[0]
 
-        convolutions = []
-        for i in range(hparams.encoder_n_convolutions):
+        self.encoder_kernel_size = hparams.encoder_kernel_size # 5
+        self.encoder_cnn_dropout_p = hparams.encoder_cnn_dropout_p # 0.5
+
+
+        self.convolution_list = nn.ModuleList()
+        for i in range(self.encoder_n_convolutions):
             conv_layer = nn.Sequential(
-                ConvNorm(hparams.encoder_input_dim[i],
-                         hparams.encoder_output_dim[i],
-                         kernel_size=hparams.encoder_kernel_size, stride=1,
-                         padding=int((hparams.encoder_kernel_size - 1) / 2),
-                         dilation=1, w_init_gain='relu'),
-                nn.BatchNorm1d(hparams.encoder_embedding_dim))
-            convolutions.append(conv_layer)
-        self.convolutions = nn.ModuleList(convolutions)
+                # def __init__(self, in_channels, out_channels, kernel_size, stride, padding, bias, w_init_gain):
+                Conv1d_init(in_channels=self.encoder_input_dim[i],
+                            out_channels=self.encoder_output_dim[i],
+                            kernel_size=self.encoder_kernel_size, 
+                            stride=1,
+                            padding=int((self.encoder_kernel_size - 1) / 2),
+                            bias=True,
+                            w_init_gain='relu'),
+                nn.BatchNorm1d(self.encoder_output_dim[i]),
+                nn.ReLU(),
+                nn.Dropout(p=self.encoder_cnn_dropout_p),
+                )
+            self.convolution_list.append(conv_layer)
 
-        self.lstm = nn.LSTM(hparams.encoder_embedding_dim,
-                            int(hparams.encoder_embedding_dim / 2), 1,
-                            batch_first=True, bidirectional=True)
+
+        self.lstm = nn.LSTM(input_size=hparams.encoder_output_dim[-1], 
+                            hidden_size=int(hparams.encoder_embedding_dim / 2), 
+                            num_layers=1, 
+                            batch_first=True, 
+                            bidirectional=True)
+
 
     def forward(self, x, input_lengths):
-        for conv in self.convolutions:
-            x = F.dropout(F.relu(conv(x)), 0.5, self.training)
+        # CNN
+        for i in range(self.encoder_n_convolutions):
+            x = self.convolution_list[i](x)
 
+        # LSTM
         x = x.transpose(1, 2)
-
-        # pytorch tensor are not reversible, hence the conversion
-        input_lengths = input_lengths.cpu().numpy()
-        x = nn.utils.rnn.pack_padded_sequence(
-            x, input_lengths, enforce_sorted=False, batch_first=True)
-        self.lstm.flatten_parameters()
         outputs, _ = self.lstm(x)
 
-        outputs, _ = nn.utils.rnn.pad_packed_sequence(
-            outputs, batch_first=True)
+        # 其实没有考虑 mask, 第三版再说吧
+        # x = nn.utils.rnn.pack_padded_sequence(x, input_lengths, enforce_sorted=False, batch_first=True)
+        # self.lstm.flatten_parameters()
+        # outputs, _ = nn.utils.rnn.pad_packed_sequence(
+        #     outputs, batch_first=True)
 
         return outputs
 
     def inference(self, x):
-        for conv in self.convolutions:
-            x = F.dropout(F.relu(conv(x)), 0.5, self.training)
+        # CNN
+        for i in range(self.encoder_n_convolutions):
+            x = self.convolution_list[i](x)
 
+        # LSTM
         x = x.transpose(1, 2)
-
-        self.lstm.flatten_parameters()
         outputs, _ = self.lstm(x)
 
         return outputs
