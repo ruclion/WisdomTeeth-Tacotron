@@ -62,9 +62,12 @@ class hparams:
 
         output_directory = './ckpt_model'
         log_directory = './log_dir'
+        inference_directory = './infer_eval_dir'
         checkpoint_path = None
+
 
         epochs=500
         seed=4321
         mel_training_files='./training_data/mel-bznsyp_character_pinyin_data_train.txt'
         mel_validation_files='./training_data/mel-bznsyp_character_pinyin_data_val.txt'
+        mel_test_files='./training_data/mel-bznsyp_character_pinyin_data_test.txt'
