@@ -1,3 +1,4 @@
+import os
 import torch
 import random
 import numpy as np
@@ -7,10 +8,11 @@ _pad = '_'
 _eos = '~'
 _tone = '123456'
 _letters = 'abcdefghijklmnopqrstuvwxyz'
+_space = ' '
 
 
 # Export all symbols:
-symbols = [_pad] + [_eos] + list(_tone) + list(_letters)
+symbols = [_pad] + [_eos] + list(_tone) + list(_letters) + [_space]
 
 
 _symbol_to_id = {s: i for i, s in enumerate(symbols)}
@@ -19,9 +21,9 @@ _id_to_symbol = {i: s for i, s in enumerate(symbols)}
 
 
 def text_to_sequence(text):
-  res =  [_symbol_to_id[s] for s in symbols]
-  res.append(_symbol_to_id['~'])
-  return res
+    res =  [_symbol_to_id[s] for s in text]
+    res.append(_symbol_to_id['~'])
+    return res
 
 
 def sequence_to_text(sequence):
@@ -49,12 +51,13 @@ class TextMelDataset(torch.utils.data.Dataset):
     def files_to_list(self, file_path):
         f_list = []
         with open(file_path, encoding = 'utf-8') as f:
-            for line in f:
-                parts = line.strip().strip('\ufeff').split('|') #remove BOM
+            for line in f.readlines():
+                parts = line.strip().split('|') 
                 # mel_file_path
-                path  = parts[0]
+                path  = parts[1]
                 # text
-                text  = parts[1]
+                text  = parts[5]
+                # print(text)
                 f_list.append([text, path])
         return f_list
 
@@ -68,7 +71,9 @@ class TextMelDataset(torch.utils.data.Dataset):
     def get_mel(self, file_path):
         # 便于习惯, 均修正为 seq_first, 即 (B, T_out, num_mels)
         # stored melspec: np.ndarray [shape=(T_out, num_mels)]
-        melspec = torch.from_numpy(np.load(file_path))
+        mel_abs_path = os.path.join('/ceph/home/hujk17/WisdomTeeth-Tacotron/preprocess_dataset/training_data/mels', file_path)
+        melspec = torch.from_numpy(np.load(mel_abs_path))
+        # assert melspec.shape[-1] == 80
         return melspec
 
 
@@ -78,7 +83,9 @@ class TextMelDataset(torch.utils.data.Dataset):
 
 
     def __getitem__(self, index):
-        return self.get_mel_text_pair(self.f_list[index][0], self.f_list[index][1])
+        a = self.get_mel_text_pair(self.f_list[index][0], self.f_list[index][1])
+        print('inner:', a)
+        return a
 
 
     def __len__(self):
@@ -133,3 +140,6 @@ class TextMelCollate():
 
         return text_padded, input_lengths, mel_padded, gate_padded, output_lengths
 
+
+if __name__ == '__main__':
+    print(len(symbols))

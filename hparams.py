@@ -1,6 +1,3 @@
-from text import symbols
-
-
 class hparams:
 
         # Audio Parameters             
@@ -8,7 +5,7 @@ class hparams:
 
 
         # Phoneme lookup-table parameters
-        n_symbols=len(symbols)
+        n_symbols=34
 
 
         # Encoder parameters
@@ -67,7 +64,7 @@ class hparams:
 
 
         epochs=500
-        seed=4321
-        mel_training_files='./preprocess_dataset/training_data/mel-bznsyp_character_pinyin_data_train.txt'
-        mel_validation_files='./preprocess_dataset/training_data/mel-bznsyp_character_pinyin_data_val.txt'
-        mel_test_files='./preprocess_dataset/training_data/mel-bznsyp_character_pinyin_data_test.txt'
+        seed=4321 
+        mel_training_files='./preprocess_dataset/training_data/train.txt'
+        mel_validation_files='./preprocess_dataset/training_data/val.txt'
+        mel_test_files='./preprocess_dataset/training_data/test.txt'

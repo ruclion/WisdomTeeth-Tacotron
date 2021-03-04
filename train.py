@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 
 from hparams import hparams
 from models import Tacotron2
-from dataset import TextMelLoader, TextMelCollate
+from dataset import TextMelDataset, TextMelCollate
 
 
 
@@ -86,11 +86,13 @@ def validate(model, loss_f, val_loader, epoch):
 
 def train_tacotron():
     # data
-    trainset = TextMelLoader(hparams.mel_training_files, hparams)
-    valset = TextMelLoader(hparams.mel_validation_files, hparams)
+    trainset = TextMelDataset(hparams.mel_training_files, hparams)
+    valset = TextMelDataset(hparams.mel_validation_files, hparams)
+    collate_fn = TextMelCollate(hparams.n_frames_per_step)
+    assert hparams.n_frames_per_step == 1
 
-    train_loader = DataLoader(trainset, num_workers=0, shuffle=True, batch_size=hparams.batch_size, collate_fn=TextMelCollate, drop_last=True)
-    val_loader = DataLoader(valset, num_workers=0, shuffle=False, batch_size=hparams.batch_size, collate_fn=TextMelCollate)
+    train_loader = DataLoader(trainset, num_workers=0, shuffle=True, batch_size=hparams.batch_size, collate_fn=collate_fn, drop_last=True)
+    val_loader = DataLoader(valset, num_workers=0, shuffle=False, batch_size=hparams.batch_size, collate_fn=collate_fn)
 
 
     # model
