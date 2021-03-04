@@ -2,7 +2,36 @@ import torch
 import random
 import numpy as np
 
-from text import text_to_sequence
+
+_pad = '_'
+_eos = '~'
+_tone = '123456'
+_letters = 'abcdefghijklmnopqrstuvwxyz'
+
+
+# Export all symbols:
+symbols = [_pad] + [_eos] + list(_tone) + list(_letters)
+
+
+_symbol_to_id = {s: i for i, s in enumerate(symbols)}
+_id_to_symbol = {i: s for i, s in enumerate(symbols)}
+
+
+
+def text_to_sequence(text):
+  res =  [_symbol_to_id[s] for s in symbols]
+  res.append(_symbol_to_id['~'])
+  return res
+
+
+def sequence_to_text(sequence):
+  result = ''
+  for symbol_id in sequence:
+    if symbol_id in _id_to_symbol:
+      s = _id_to_symbol[symbol_id]
+      result += s
+  return result
+
 
 
 class TextMelDataset(torch.utils.data.Dataset):
