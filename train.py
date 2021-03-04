@@ -21,17 +21,20 @@ class Tacotron2Loss(nn.Module):
     def __init__(self):
         super(Tacotron2Loss, self).__init__()
 
-    def forward(self, model_output, targets):
-        mel_target, gate_target = targets[0], targets[1]
-        mel_target.requires_grad = False
-        gate_target.requires_grad = False
-        gate_target = gate_target.view(-1, 1)
-
-        mel_out, mel_out_postnet, gate_out, _ = model_output
-        gate_out = gate_out.view(-1, 1)
+    def forward(self, mel_out, mel_out_postnet, gate_out, mel_target, gate_target):
+        print(mel_target.requires_grad)
+        assert mel_target.requires_grad == False
+        assert gate_target.requires_grad == False
+        
+        # mel-rec
         mel_loss = nn.MSELoss()(mel_out, mel_target) + \
                    nn.MSELoss()(mel_out_postnet, mel_target)
+
+        # stop
+        gate_target = gate_target.view(-1, 1)
+        gate_out = gate_out.view(-1, 1)
         gate_loss = nn.BCEWithLogitsLoss()(gate_out, gate_target)
+
         return mel_loss + gate_loss, mel_loss, gate_loss
 
 
@@ -97,11 +100,8 @@ def train_tacotron():
     trainset = TextMelLoader(hparams.mel_training_files, hparams)
     valset = TextMelLoader(hparams.mel_validation_files, hparams)
 
-    train_loader = DataLoader(trainset, num_workers=0, shuffle=True,
-                              batch_size=hparams.batch_size,
-                              drop_last=True)
-    val_loader = DataLoader(valset, num_workers=0,
-                                shuffle=False, batch_size=hparams.batch_size)
+    train_loader = DataLoader(trainset, num_workers=0, shuffle=True, batch_size=hparams.batch_size, drop_last=True)
+    val_loader = DataLoader(valset, num_workers=0, shuffle=False, batch_size=hparams.batch_size)
 
 
     # model, 分布式的下一版再写
@@ -118,17 +118,13 @@ def train_tacotron():
 
     # ckpt
     if hparams.checkpoint_path is not None:
-        checkpoint_path = hparams.checkpoint_path
-        checkpoint_dict = torch.load(checkpoint_path)
+        checkpoint_dict = torch.load(hparams.checkpoint_path)
+
+        # dict
         model.load_state_dict(checkpoint_dict['state_dict'])
         optimizer.load_state_dict(checkpoint_dict['optimizer_state_dict'])
         aready_epoch = checkpoint_dict['epoch']
-        # learning_rate = checkpoint_dict['learning_rate']
-        
-
-        # lr的衰减先放在这里
-        # if hparams.use_saved_learning_rate:
-        #     learning_rate = _learning_rate
+        # lr的衰减还没写
     else:
         aready_epoch = 0
             
@@ -138,45 +134,36 @@ def train_tacotron():
     iteration = 0
     for epoch in range(aready_epoch, hparams.epochs):
         print("Epoch: {}".format(epoch))
-        for i, batch in enumerate(train_loader):
+        for _i, batch in enumerate(train_loader):
             # time
             start = time.perf_counter()
-            # lr的衰减先放在这里
-            # for param_group in optimizer.param_groups:
-            #     param_group['lr'] = learning_rate
 
 
             # flow [1]:  data to 'cuda'
-            text_padded, input_lengths, mel_padded, gate_padded, output_lengths = batch
+            text_padded, input_lengths, mel_padded, gate_padded, _output_lengths = batch
+            # for train input
             text_padded = text_padded.to(device).long()
             input_lengths = input_lengths.to(device).long()
-            max_len = torch.max(input_lengths.data).item().to(device)
             mel_padded = mel_padded.to(device).float()
+            # for loss
             gate_padded = gate_padded.to(device).float()
-            output_lengths = output_lengths.to(device).long()
-
-            x, y = (
-            (text_padded, input_lengths, mel_padded, max_len, output_lengths),
-            (mel_padded, gate_padded),
-            )
 
 
             # flow [2]:  predict
-            y_pred = model(x)
+            mels_pre, mels_pre_postnet, gates_pre, _alignments_pre = model(text_padded, input_lengths, mel_padded)
 
 
             # flow [3]:  loss
-            loss, mel_loss, gate_loss = loss_f(y_pred, y)
+            loss, mel_loss, gate_loss = loss_f(mels_pre, mels_pre_postnet, gates_pre, mel_padded, gate_padded)
             reduced_loss = loss.item() # loss
-            reduced_mel_loss = mel_loss.item() # only show
-            reduced_gate_loss = gate_loss.item() # only show
+            _reduced_mel_loss = mel_loss.item() # only show
+            _reduced_gate_loss = gate_loss.item() # only show
 
 
             # backward
             model.zero_grad()
             loss.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                model.parameters(), hparams.grad_clip_thresh)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), hparams.grad_clip_thresh)
 
 
             # apply
