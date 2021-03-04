@@ -1,90 +1,106 @@
-import json
-import random
-import codecs
-import numpy as np
 import torch
-import torch.utils.data
+import random
+import numpy as np
 
-from utils import load_filepaths_and_text
+from text import text_to_sequence
 
 
-def get_mel_text_pair(melpath_and_text):
-        # separate filename and text
-        melpath = melpath_and_text[0]
-        text = melpath_and_text[1]
-        mel = torch.from_numpy(np.load(melpath))
+class TextMelDataset(torch.utils.data.Dataset):
+    """
+        1) loads filepath,text pairs
+        2) change text to symbol id sequence
+        3) loads mel-spectrograms from mel files
+    """
+    def __init__(self, fname, hparams):
+        self.f_list = self.files_to_list(fname)
+        random.seed(hparams.seed)
+        random.shuffle(self.f_list)
+
+
+    def files_to_list(self, file_path):
+        f_list = []
+        with open(file_path, encoding = 'utf-8') as f:
+            for line in f:
+                parts = line.strip().strip('\ufeff').split('|') #remove BOM
+                # mel_file_path
+                path  = parts[0]
+                # text
+                text  = parts[1]
+                f_list.append([text, path])
+        return f_list
+
+
+    def get_mel_text_pair(self, text, file_path):
+        text = self.get_text(text)
+        mel = self.get_mel(file_path)
         return (text, mel)
 
 
-class TextMelLoader(torch.utils.data.Dataset):
-    """
-        1) loads audio,text pairs
-        2) normalizes text and converts them to sequences of one-hot vectors
-        3) computes mel-spectrograms from audio files.
-    """
-    def __init__(self, melpaths_and_text, hparams):
-        self.melpaths_and_text = load_filepaths_and_text(melpaths_and_text)
-        random.seed(hparams.seed)
-        random.shuffle(self.melpaths_and_text)
+    def get_mel(self, file_path):
+        # 便于习惯, 均修正为 seq_first, 即 (B, T_out, num_mels)
+        # stored melspec: np.ndarray [shape=(T_out, num_mels)]
+        melspec = torch.from_numpy(np.load(file_path))
+        return melspec
+
+
+    def get_text(self, text):
+        text_norm = torch.tensor(np.asarray(text_to_sequence(text)))
+        return text_norm
 
 
     def __getitem__(self, index):
-        return get_mel_text_pair(self.melpaths_and_text[index])
+        return self.get_mel_text_pair(self.f_list[index][0], self.f_list[index][1])
 
 
     def __len__(self):
-        return len(self.melpaths_and_text)
+        return len(self.f_list)
 
 
 
 
-# class TextMelCollate():
-#     """ Zero-pads model inputs and targets based on number of frames per setep
-#     """
-#     def __init__(self, n_frames_per_step):
-#         self.n_frames_per_step = n_frames_per_step
 
-#     def __call__(self, batch):
-#         """Collate's training batch from normalized text and mel-spectrogram
-#         PARAMS
-#         ------
-#         batch: [text_normalized, mel_normalized]
-#         """
-#         # Right zero-pad all one-hot text sequences to max input length
-#         input_lengths, ids_sorted_decreasing = torch.sort(
-#             torch.LongTensor([len(x[0]) for x in batch]),
-#             dim=0, descending=True)
-#         max_input_len = input_lengths[0]
+class TextMelCollate():
+    """ Zero-pads model inputs and targets based on number of frames per step
+    """
+    def __init__(self, n_frames_per_step):
+        self.n_frames_per_step = n_frames_per_step
 
-#         inputs_padded = torch.LongTensor(len(batch), max_input_len)
-#         inputs_padded.zero_()
-#         for i in range(len(ids_sorted_decreasing)):
-#             input_id = batch[ids_sorted_decreasing[i]][0]
-#             inputs_padded[i, :input_id.shape[0]] = input_id
+    def __call__(self, batch):
+        """Collate's training batch from normalized text and mel-spectrogram
+        PARAMS
+        ------
+        batch: [text_normalized, mel_normalized]
+        """
+        # Right zero-pad all one-hot text sequences to max input length
+        input_lengths, ids_sorted_decreasing = torch.sort(
+            torch.LongTensor([len(x[0]) for x in batch]),
+            dim=0, descending=True)
+        max_input_len = input_lengths[0]
 
-#         phonemes_padded = torch.LongTensor(len(batch), max_input_len)
-#         phonemes_padded.zero_()
-#         for i in range(len(ids_sorted_decreasing)):
-#             phoneme_id = batch[ids_sorted_decreasing[i]][1]
-#             phonemes_padded[i, :phoneme_id.shape[0]] = phoneme_id
+        text_padded = torch.LongTensor(len(batch), max_input_len)
+        text_padded.zero_()
+        for i in range(len(ids_sorted_decreasing)):
+            text = batch[ids_sorted_decreasing[i]][0]
+            text_padded[i, :text.size(0)] = text
 
-#         # Right zero-pad mel-spec
-#         num_mels = batch[0][2].size(0)
-#         max_target_len = max([x[2].size(1) for x in batch])
-#         if max_target_len % self.n_frames_per_step != 0:
-#             max_target_len += self.n_frames_per_step - max_target_len % self.n_frames_per_step
-#             assert max_target_len % self.n_frames_per_step == 0
+        # Right zero-pad mel-spec
+        num_mels = batch[0][1].size(0)
+        max_target_len = max([x[1].size(1) for x in batch])
+        if max_target_len % self.n_frames_per_step != 0:
+            max_target_len += self.n_frames_per_step - max_target_len % self.n_frames_per_step
+            assert max_target_len % self.n_frames_per_step == 0
 
-#         # include mel padded and gate padded
-#         mel_padded = torch.FloatTensor(len(batch), num_mels, max_target_len)
-#         mel_padded.zero_()
-#         gate_padded = torch.FloatTensor(len(batch), max_target_len)
-#         gate_padded.zero_()
-#         output_lengths = torch.LongTensor(len(batch))
-#         for i in range(len(ids_sorted_decreasing)):
-#             mel = batch[ids_sorted_decreasing[i]][2]
-#             mel_padded[i, :, :mel.size(1)] = mel
-#             gate_padded[i, mel.size(1)-1:] = 1
-#             output_lengths[i] = mel.size(1)
+        # include mel padded and gate padded
+        mel_padded = torch.FloatTensor(len(batch), num_mels, max_target_len)
+        mel_padded.zero_()
+        gate_padded = torch.FloatTensor(len(batch), max_target_len)
+        gate_padded.zero_()
+        output_lengths = torch.LongTensor(len(batch))
+        for i in range(len(ids_sorted_decreasing)):
+            mel = batch[ids_sorted_decreasing[i]][1]
+            mel_padded[i, :, :mel.size(1)] = mel
+            gate_padded[i, mel.size(1)-1:] = 1
+            output_lengths[i] = mel.size(1)
 
-#         return input_lengths, inputs_padded, phonemes_padded, mel_padded, gate_padded, output_lengths
+        return text_padded, input_lengths, mel_padded, gate_padded, output_lengths
+

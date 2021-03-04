@@ -8,10 +8,7 @@ _id_to_symbol = {i: s for i, s in enumerate(symbols)}
 
 
 def text_to_sequence(text):
-  # map
   res =  _symbols_to_sequence(text)
-
-  # Append EOS token
   res.append(_symbol_to_id['~'])
   return res
 
