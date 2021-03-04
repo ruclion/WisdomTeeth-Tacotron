@@ -1,13 +1,15 @@
 import torch
 from torch import nn
+from math import sqrt
+import numpy as np
 from hparams import hparams
-# from torch.nn import functional as F
 
 
 def get_mask_from_lengths(lengths):
     max_len = torch.max(lengths).item()
-    ids = torch.arange(0, max_len, out=torch.cuda.LongTensor(max_len))
-    mask = (ids < lengths.unsqueeze(1)).bool()
+    mask = torch.zeros(lengths.shape[0], max_len).byte().zero_()
+    for idx, l in enumerate(lengths):
+        mask[idx][:l] = 1
     return mask
 
 
@@ -128,18 +130,20 @@ class Attention(nn.Module):
     # processed_memory: processed encoder outputs, 用来作为 add score 相关性的基底 (B, Text_length, attention_dim=128)
     # attention_weights_cat: previous and cummulative attention weights (B, 2, Text_length)
     # mask_seq: memory 序列中后面几个需要根据 mask_seq 来 mask (B, Text_length)
-    def forward(self, attention_rnn_last_output, memory, processed_memory, attention_weights_cat, mask_seq):
+    def forward(self, attention_rnn_last_output, memory, processed_memory, attention_weights_cat, reverse_memory_mask):
         # scores
         scores = self._get_alignment_scores(attention_rnn_last_output, processed_memory, attention_weights_cat)
 
 
         # masks, in-place 操作 mask 应该没事吧
-        mask_min_inf = -float("inf")
-        scores.data.masked_fill_(mask_seq, mask_min_inf)
+        if reverse_memory_mask is not None:
+            mask_min_inf = -float("inf")
+            scores.data.masked_fill_(reverse_memory_mask, mask_min_inf)
 
 
         # energys / attentions
-        now_attention_weights = self.softmax(scores)                                 # (B, Text_length) -> (B, Text_length)
+        # (B, Text_length) -> (B, Text_length)
+        now_attention_weights = self.softmax(scores)                                 
 
 
         # context
@@ -272,34 +276,20 @@ class Encoder(nn.Module):
                             bidirectional=True)
 
 
-    def forward(self, x, input_lengths):
+    def forward(self, x):
+        # (B, 512, Text_length)
+        assert x.shape[1] == 512
+
         # CNN
         for i in range(self.encoder_n_convolutions):
             x = self.convolution_list[i](x)
 
         # LSTM
-        x = x.transpose(1, 2)
-        outputs, _ = self.lstm(x)
-
-        # 其实没有考虑 mask, 第三版再说吧
-        # x = nn.utils.rnn.pack_padded_sequence(x, input_lengths, enforce_sorted=False, batch_first=True)
-        # self.lstm.flatten_parameters()
-        # outputs, _ = nn.utils.rnn.pad_packed_sequence(
-        #     outputs, batch_first=True)
-
-        return outputs
-
-    def inference(self, x):
-        # CNN
-        for i in range(self.encoder_n_convolutions):
-            x = self.convolution_list[i](x)
-
-        # LSTM
+        # (B, 512, Text_length) -> (B, Text_length, 512)
         x = x.transpose(1, 2)
         outputs, _ = self.lstm(x)
 
         return outputs
-
 
 
 
@@ -309,7 +299,7 @@ class Decoder(nn.Module):
         # reduce factor
         self.n_mel_channels = hparams.n_mel_channels # 和 audio 模块共用这个参数
         self.n_frames_per_step = hparams.n_frames_per_step
-
+        assert self.n_frames_per_step == 1
 
         # 两个 rnn 和两层 prenet
         self.attention_rnn_dim = hparams.attention_rnn_dim # 和 attention 模块共用这个参数
@@ -378,9 +368,10 @@ class Decoder(nn.Module):
 
         
 
-    def initialize_decoder_states(self, memory, mask_seq):
+    def initialize_decoder_states(self, memory):
         B = memory.size(0)
         Text_length = memory.size(1)
+        
 
         # 开始初始化
         self.attention_rnn_hidden = torch.zeros((B, self.attention_rnn_dim), dtype=memory.dtype)
@@ -393,70 +384,16 @@ class Decoder(nn.Module):
         self.attention_weights_cum = torch.zeros((B, Text_length), dtype=memory.dtype)
         self.context = torch.zeros((B, self.final_encoder_output_dim), dtype=memory.dtype)
 
+
+
+    def prepare_whole_loop_variable(self, memory, reverse_memory_mask):
         self.memory = memory
         self.processed_memory = self.attention_module.memory_linear(memory)
-        self.mask = mask_seq
+        self.reverse_memory_mask = reverse_memory_mask
 
 
 
-    def parse_decoder_inputs(self, decoder_inputs):
-        """ Prepares decoder inputs, i.e. mel outputs
-        PARAMS
-        ------
-        decoder_inputs: inputs used for teacher-forced training, i.e. mel-specs
-
-        RETURNS
-        -------
-        inputs: processed decoder inputs
-
-        """
-        # 先只考虑 reduce factor 为 1 的时候
-        assert self.n_frames_per_step == 1
-
-        # (B, n_mel_channels, T_out) -> (B, T_out, n_mel_channels)
-        decoder_inputs = decoder_inputs.transpose(1, 2)
-        decoder_inputs = decoder_inputs.reshape(
-            decoder_inputs.size(0),
-            int(decoder_inputs.size(1)/self.n_frames_per_step), -1)
-        # (B, T_out, n_mel_channels) -> (T_out, B, n_mel_channels)
-        decoder_inputs = decoder_inputs.transpose(0, 1)
-        return decoder_inputs
-
-    def parse_decoder_outputs(self, mel_outputs, gate_outputs, alignments):
-        """ Prepares decoder outputs for output
-        PARAMS
-        ------
-        mel_outputs:
-        gate_outputs: gate output energies
-        alignments:
-
-        RETURNS
-        -------
-        mel_outputs:
-        gate_outpust: gate output energies
-        alignments:
-        """
-         # 先只考虑 reduce factor 为 1 的时候
-        assert self.n_frames_per_step == 1
-
-        # (T_out, B) -> (B, T_out)
-        alignments = torch.stack(alignments).transpose(0, 1)
-        # (T_out, B) -> (B, T_out)
-        gate_outputs = torch.stack(gate_outputs).transpose(0, 1).contiguous()
-
-        # 中间有 0 咋办?
-        gate_outputs = gate_outputs.repeat_interleave(self.n_frames_per_step, 1)
-
-        # (T_out, B, n_mel_channels) -> (B, T_out, n_mel_channels)
-        mel_outputs = torch.stack(mel_outputs).transpose(0, 1).contiguous()
-        # decouple frames per step
-        mel_outputs = mel_outputs.view(mel_outputs.size(0), -1, self.n_mel_channels)
-        # (B, T_out, n_mel_channels) -> (B, n_mel_channels, T_out)
-        mel_outputs = mel_outputs.transpose(1, 2)
-
-        return mel_outputs, gate_outputs, alignments
-
-    def decode(self, decoder_input):
+    def decode_one_step(self, decoder_input):
         """ Decoder step using stored states, attention and memory
         PARAMS
         ------
@@ -483,8 +420,7 @@ class Decoder(nn.Module):
             memory=self.memory, 
             processed_memory=self.processed_memory,
             attention_weights_cat=attention_weights_cat, 
-            mask_seq=self.mask_seq)
-
+            reverse_memory_mask=self.reverse_memory_mask)
 
 
         decoder_input = torch.cat((self.new_attention_rnn_hidden, new_context), -1)
@@ -494,11 +430,14 @@ class Decoder(nn.Module):
 
         new_decoder_hidden_context = torch.cat((self.new_decoder_hidden, new_context), dim=1)
         new_decoder_output = self.linear_projection(new_decoder_hidden_context)
+        assert new_decoder_output.shape[1] == 80
 
 
         # 特别为了 gate-stop 的预测增加了 attention_weights, 防止过早于 mel 谱的 early-stop
         new_decoder_hidden_context_attention_weights = torch.cat((self.new_decoder_hidden, new_context, new_attention_weights), dim=1)
         new_gate_prediction = self.gate_layer(new_decoder_hidden_context_attention_weights)
+        assert new_gate_prediction.shape[1] == 1
+        new_gate_prediction = new_gate_prediction.squeeze(dim=1)
 
 
         # [1]
@@ -516,83 +455,123 @@ class Decoder(nn.Module):
 
         return new_decoder_output, new_gate_prediction, new_attention_weights
 
+
+
+    # PARAMS
+    # ------
+    # memory: Encoder outputs, (B, Text_length, 512)
+    # decoder_inputs: mel-specs-teacher, (B, output_lengths, 80) / None
+    # memory_lengths: memory lengths for attention masking, (B,) / None
+
+    # RETURNS
+    # -------
+    # 后面还有 postnet, 为了 CNN 方便, 就先 channel first 吧, 先不修正
+    # mel_outputs: (B, n_mel_channels-80, output_length)
+    # gate_outputs: (B, output_length)
+    # alignments: (B, output_length, max_Text_length)
     def forward(self, memory, decoder_inputs, memory_lengths):
-        """ Decoder forward pass for training
-        PARAMS
-        ------
-        memory: Encoder outputs
-        decoder_inputs: Decoder inputs for teacher forcing. i.e. mel-specs
-        memory_lengths: Encoder output lengths for attention masking.
+        # check 参数
+        # memory, (B, Text_length, 512)
+        assert memory.shape[2] == 512
 
-        RETURNS
-        -------
-        mel_outputs: mel outputs from the decoder
-        gate_outputs: gate outputs from the decoder
-        alignments: sequence of attention weights from the decoder
-        """
+        # decoder_inputs, (B, output_lengths, 80) / None
+        if decoder_inputs is not None:
+            assert decoder_inputs.shape[2] == 80
 
-        decoder_input = self.get_go_frame(memory).unsqueeze(0)
-        decoder_inputs = self.parse_decoder_inputs(decoder_inputs)
-        decoder_inputs = torch.cat((decoder_input, decoder_inputs), dim=0)
-        decoder_inputs = self.prenet(decoder_inputs)
+        # memory_lengths, (B,) / None
+        if memory_lengths is not None:
+            assert len(memory_lengths.shape) == 1
 
-        # 对输入进行, 但是 mask 取反感觉错误了
-        self.initialize_decoder_states(memory, mask_seq=~get_mask_from_lengths(memory_lengths))
-        print(~get_mask_from_lengths(memory_lengths))
-        assert False
+        # 增加一个临时参数, tag, 为了方便
+        if decoder_inputs is not None:
+            teacherForce_tag = True
+        else:
+            teacherForce_tag = False
 
+
+        # 开始了:
+        # --- (1) --- go frame
+        if teacherForce_tag:
+            decoder_input = self.get_go_frame(memory=memory).unsqueeze(0)
+        else:
+            decoder_input = self.get_go_frame(memory=memory)
+
+        # --- (2) --- 准备 两个 rnn 的初始状态, 以及
+        self.initialize_decoder_states(memory=memory)
+
+        # --- (3) --- memory, processed_memory, reverse_memory_mask 的准备
+        if teacherForce_tag and (memory_lengths is not None):
+            self.prepare_whole_loop_variable(memory=memory, reverse_memory_mask=~get_mask_from_lengths(memory_lengths))
+        else:
+            self.prepare_whole_loop_variable(memory=memory, reverse_memory_mask=None)
+        
+
+        # --- (4) --- 自回归, alignments 就是 attention_weights 的图
         mel_outputs, gate_outputs, alignments = [], [], []
-        while len(mel_outputs) < decoder_inputs.size(0) - 1:
-            decoder_input = decoder_inputs[len(mel_outputs)]
-            mel_output, gate_output, attention_weights = self.decode(decoder_input)
 
-            # add List
-            mel_outputs += [mel_output.squeeze(1)]
-            gate_outputs += [gate_output.squeeze(1)]
-            alignments += [attention_weights]
+        if teacherForce_tag:
+            # 构建自回归的 teacherForce 数组:
+            # [1] (B, T_out, n_mel_channels) -> (T_out, B, n_mel_channels)
+            decoder_inputs = decoder_inputs.transpose(0, 1)
+            # [2] cat
+            decoder_inputs = torch.cat((decoder_input, decoder_inputs), dim=0)
 
-        # alignments 就是 attention_weights 的图
-        mel_outputs, gate_outputs, alignments = self.parse_decoder_outputs(mel_outputs, gate_outputs, alignments)
+            # prenet
+            decoder_inputs = self.prenet(decoder_inputs)
+
+
+            # loop
+            while len(mel_outputs) < decoder_inputs.size(0) - 1:
+                decoder_input = decoder_inputs[len(mel_outputs)]
+                mel_output, gate_output, attention_weights = self.decode_one_step(decoder_input)
+
+                # add List
+                mel_outputs += [mel_output]
+                gate_outputs += [gate_output]
+                alignments += [attention_weights]
+        else:
+            while True:
+                # (B, Time, dim) 和 (B, dim) 均可以使用 prenet
+                decoder_input = self.prenet(decoder_input)
+
+                # loop 的核心
+                mel_output, gate_output, alignment = self.decode_one_step(decoder_input)
+
+                mel_outputs += [mel_output]
+                gate_outputs += [gate_output]
+                alignments += [alignment]
+
+                if torch.sigmoid(gate_output.data) > self.gate_threshold:
+                    break
+                elif len(mel_outputs) * self.n_frames_per_step >= self.max_decoder_steps:
+                    assert False
+                    break
+
+                decoder_input = mel_output
+
+
+
+        # 对 while 循环进行总结
+        # List -> Tensor
+        # [1] mels
+        # (output_length, B, n_mel_channels) 
+        # -> (B, output_length, n_mel_channels)
+        # -> (B, n_mel_channels, output_length)
+        mel_outputs = torch.stack(mel_outputs).transpose(0, 1).transpose(1, 2)
+        assert mel_outputs.shape[1] == 80
+        
+        # [2] gate_outputs
+        # (output_length, B) -> (B, output_length)
+        gate_outputs = torch.stack(gate_outputs).transpose(0, 1)
+        assert gate_outputs.shape[1] == mel_outputs.shape[2]
+
+        # [3] alignments
+        # (output_length, B, max_Text_length) -> (B, output_length, max_Text_length)
+        alignments = torch.stack(alignments).transpose(0, 1)
+        assert alignments.shape[1] == mel_outputs.shape[2]
 
         return mel_outputs, gate_outputs, alignments
 
-    def inference(self, memory):
-        """ Decoder inference
-        PARAMS
-        ------
-        memory: Encoder outputs
-
-        RETURNS
-        -------
-        mel_outputs: mel outputs from the decoder
-        gate_outputs: gate outputs from the decoder
-        alignments: sequence of attention weights from the decoder
-        """
-        decoder_input = self.get_go_frame(memory)
-
-        self.initialize_decoder_states(memory, mask_seq=None)
-
-        mel_outputs, gate_outputs, alignments = [], [], []
-        while True:
-            decoder_input = self.prenet(decoder_input)
-            mel_output, gate_output, alignment = self.decode(decoder_input)
-
-            mel_outputs += [mel_output.squeeze(1)]
-            gate_outputs += [gate_output]
-            alignments += [alignment]
-
-            if torch.sigmoid(gate_output.data) > self.gate_threshold:
-                break
-            elif len(mel_outputs) * self.n_frames_per_step >= self.max_decoder_steps:
-                print("Warning! Reached max decoder steps")
-                break
-
-            decoder_input = mel_output
-
-        mel_outputs, gate_outputs, alignments = self.parse_decoder_outputs(
-            mel_outputs, gate_outputs, alignments)
-
-        return mel_outputs, gate_outputs, alignments
 
 
 
@@ -601,57 +580,57 @@ class Tacotron2(nn.Module):
         super(Tacotron2, self).__init__()
         self.n_mel_channels = hparams.n_mel_channels
         self.n_frames_per_step = hparams.n_frames_per_step
-        self.embedding = nn.Embedding(hparams.n_symbols, hparams.encoder_embedding_dim)
+
+        # lookup-table 和 weights 初始化
+        self.embedding = nn.Embedding(hparams.n_symbols, hparams.encoder_embedding_dim) 
+        std = sqrt(2.0 / (hparams.n_symbols + hparams.encoder_embedding_dim))
+        val = sqrt(3.0) * std  # uniform bounds for std
         self.embedding.weight.data.uniform_(-val, val)
 
-        self.encoder = Encoder(hparams)
-        self.decoder = Decoder(hparams)
-        self.postnet = Postnet(hparams)
+        self.encoder_module = Encoder(hparams)
+        self.decoder_module = Decoder(hparams)
+        self.postnet_module = Postnet(hparams)
 
-    def parse_output(self, outputs, output_lengths=None):
-        if self.mask_padding and output_lengths is not None:
-            mask = ~get_mask_from_lengths(output_lengths)
-            mask = mask.expand(self.n_mel_channels, mask.size(0), mask.size(1))
-            if mask.size(2) % self.n_frames_per_step != 0:
-                to_append = torch.ones(mask.size(0), mask.size(1),
-                                       (self.n_frames_per_step - mask.size(2) % self.n_frames_per_step)).bool().to(
-                    mask.device)
-                mask = torch.cat([mask, to_append], dim=-1)
-            mask = mask.permute(1, 0, 2)
 
-            outputs[0].data.masked_fill_(mask, 0.0)
-            outputs[1].data.masked_fill_(mask, 0.0)
-            outputs[2].data.masked_fill_(mask[:, 0, :], 1e3)  # gate energies
+    def forward(self, text_padded, text_lengths, mel_padded):
+        # text_padded, (B, Text_length) 
+        # text_lengths, (B, ) / None
+        # mel_padded, (B, output_length, 80) / None
+        
+        # 开始 flow
+        # lookup-table
+        embedded_inputs = self.embedding(text_padded)
+        
+        
+        # encoder - module
+        # (B, Text_length, 512) -> (B, 512, Text_length)
+        embedded_inputs = embedded_inputs.transpose(1, 2)
+        # (B, 512, Text_length) -> (B, Text_length, 512) (LSTM 的时候修正回来了)
+        encoder_outputs = self.encoder_module(x=embedded_inputs)
 
-        return outputs
 
-    def forward(self, inputs, semantic_features):
-        text_inputs, text_lengths, mel_padded, max_len, output_lengths = inputs
-        text_lengths, output_lengths = text_lengths.data, output_lengths.data
-        embedded_inputs = self.embedding(text_inputs)
-        embedded_inputs = torch.cat([embedded_inputs, semantic_features], 2)
-        encoder_outputs = self.encoder(embedded_inputs.transpose(1, 2), text_lengths)
-        mel_outputs, gate_outputs, alignments = self.decoder(
-            encoder_outputs, mel_padded, memory_lengths=text_lengths)
-        mel_outputs_postnet = self.postnet(mel_outputs)
-        mel_outputs_postnet = mel_outputs + mel_outputs_postnet
+        # decoder - module
+        # [1] 输入
+        # encoder_outputs 已经在 LSTM 时修正 -> (B, Text_length, 512)
+        # mel_padded, (B, output_length, 80) / None
+        # text_lengths 用于设计 reverse_mask_seq, (B, output_length) / None
+        # [2] 输出
+        # mels_pre, (B, 80, output_length)
+        # gates_pre, (B, output_length)
+        # alignments_pre, (B, output_length, max_Text_length)
+        # [3] 训练或者预测:
+        mels_pre, gates_pre, alignments_pre = self.decoder_module(memory=encoder_outputs, decoder_inputs=mel_padded, memory_lengths=text_lengths)
 
-        return self.parse_output(
-            [mel_outputs, mel_outputs_postnet, gate_outputs, alignments],
-            output_lengths)
+        
+        # postnet - module
+        # (B, 80, output_length) -> (B, 80, output_length)
+        mels_pre_postnet = self.postnet_module(x=mels_pre) + mels_pre
 
-    def inference(self, inputs, semantic_features):
-        embedded_inputs = self.embedding(inputs)
-        embedded_inputs = torch.cat([embedded_inputs, semantic_features], 2)
-        encoder_outputs = self.encoder.inference(embedded_inputs.transpose(1, 2))
-        mel_outputs, gate_outputs, alignments = self.decoder.inference(
-            encoder_outputs)
-        mel_outputs_postnet = self.postnet(mel_outputs)
-        mel_outputs_postnet = mel_outputs + mel_outputs_postnet
 
-        outputs = self.parse_output(
-            [mel_outputs, mel_outputs_postnet, gate_outputs, alignments])
-
-        return outputs
-
+        # 最后 -> (B, output_lenght, 80), 更习惯
+        mels_pre_seq_first = mels_pre.transpose(1, 2)
+        mels_pre_postnet_seq_first = mels_pre_postnet.transpose(1, 2)
+        assert mels_pre_seq_first.shape[-1] == mels_pre_postnet_seq_first.shape[-1] and mels_pre_postnet_seq_first.shape[-1] == 80
+        
+        return mels_pre_seq_first, mels_pre_postnet_seq_first, gates_pre, alignments_pre
 
