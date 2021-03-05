@@ -84,7 +84,7 @@ class TextMelDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, index):
         a = self.get_mel_text_pair(self.f_list[index][0], self.f_list[index][1])
-        print('inner:', a)
+        # print('inner:', a)
         return a
 
 

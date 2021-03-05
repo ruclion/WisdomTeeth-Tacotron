@@ -12,7 +12,7 @@ from dataset import TextMelDataset, TextMelCollate
 
 
 
-device = 'cuda' 
+device = 'cuda'
 torch.manual_seed(hparams.seed)
 torch.cuda.manual_seed(hparams.seed)
 
@@ -97,7 +97,7 @@ def train_tacotron():
 
     # model
     model = Tacotron2(hparams).cuda()
-    
+
 
     # optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=hparams.learning_rate, weight_decay=hparams.weight_decay)
@@ -119,7 +119,7 @@ def train_tacotron():
         aready_epoch = 0
             
 
-
+    
     # iteration
     model.train()
     iteration = 0
@@ -132,16 +132,18 @@ def train_tacotron():
 
             # flow [1]:  data to 'cuda'
             text_padded, input_lengths, mel_padded, gate_padded, _output_lengths = batch
+            mel_padded = mel_padded.transpose(1, 2) # 修正为 (B, T_out, 80)
             # for train input
             text_padded = text_padded.to(device).long()
             input_lengths = input_lengths.to(device).long()
             mel_padded = mel_padded.to(device).float()
             # for loss
             gate_padded = gate_padded.to(device).float()
-
+            
 
             # flow [2]:  predict
             mels_pre, mels_pre_postnet, gates_pre, _alignments_pre = model(text_padded, input_lengths, mel_padded)
+            return
 
 
             # flow [3]:  loss

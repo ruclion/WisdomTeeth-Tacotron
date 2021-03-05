@@ -5,7 +5,7 @@ class hparams:
 
 
         # Phoneme lookup-table parameters
-        n_symbols=34
+        n_symbols=35
 
 
         # Encoder parameters
@@ -54,7 +54,7 @@ class hparams:
         learning_rate=1e-3
         weight_decay=1e-6
         grad_clip_thresh=1.0
-        batch_size=32
+        batch_size=2
 
 
         output_directory = './ckpt_model'
@@ -63,7 +63,7 @@ class hparams:
         checkpoint_path = None
 
 
-        epochs=500
+        epochs=1
         seed=4321 
         mel_training_files='./preprocess_dataset/training_data/train.txt'
         mel_validation_files='./preprocess_dataset/training_data/val.txt'
