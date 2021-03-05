@@ -27,10 +27,8 @@ class Tacotron2Loss(nn.Module):
         # mel-rec
         mel_loss = nn.MSELoss()(mel_out, mel_target) + nn.MSELoss()(mel_out_postnet, mel_target)
 
-        # stop
-        gate_target = gate_target.view(-1, 1)
-        gate_out = gate_out.view(-1, 1)
-        gate_loss = nn.BCEWithLogitsLoss()(gate_out, gate_target)
+        # stop, 00000111, 0代表不停, 1代表停
+        gate_loss = torch.nn.BCELoss()(gate_out, gate_target)
 
         return mel_loss + gate_loss, mel_loss, gate_loss
 
@@ -48,6 +46,8 @@ def validate(model, loss_f, val_loader, epoch):
         for _i, batch in enumerate(val_loader):
             # flow [1]:  data to 'cuda'
             text_padded, input_lengths, mel_padded, gate_padded, _output_lengths = batch
+            mel_padded = mel_padded.transpose(1, 2) # 修正为 (B, T_out, 80)
+            # device
             text_padded = text_padded.to(device).long()
             input_lengths = input_lengths.to(device).long()
             mel_padded = mel_padded.to(device).float()
@@ -69,6 +69,7 @@ def validate(model, loss_f, val_loader, epoch):
             val_loss += reduced_loss
             val_mel_loss += reduced_mel_loss
             val_gate_loss += reduced_gate_loss
+            # break
 
 
 
@@ -77,7 +78,7 @@ def validate(model, loss_f, val_loader, epoch):
         val_gate_loss = val_gate_loss / num
 
 
-    print("Validation loss {}: {:9f}  {:9f}  {:9f}  ".format(epoch, val_loss, val_mel_loss, val_gate_loss))
+    print("Validation loss {}: {:9f} mel {:9f} gate {:9f}  ".format(epoch, val_loss, val_mel_loss, val_gate_loss))
 
     model.train()
     return
@@ -143,7 +144,7 @@ def train_tacotron():
 
             # flow [2]:  predict
             mels_pre, mels_pre_postnet, gates_pre, _alignments_pre = model(text_padded, input_lengths, mel_padded)
-            print('00000000000000')
+
 
             # flow [3]:  loss
             loss, mel_loss, gate_loss = loss_f(mels_pre, mels_pre_postnet, gates_pre, mel_padded, gate_padded)
@@ -163,17 +164,25 @@ def train_tacotron():
 
 
             # logs
-            print("Train loss {} {:.6f} {:.6f} {:.6f} Grad Norm {:.6f} {:.2f}s/it".format(iteration, reduced_loss, _reduced_mel_loss, _reduced_gate_loss, grad_norm, time.perf_counter() - start))
+            print("Train loss {} {:.6f} mel {:.6f} gate {:.6f} Grad Norm {:.6f} {:.2f}s/it".format(iteration, reduced_loss, _reduced_mel_loss, _reduced_gate_loss, grad_norm, time.perf_counter() - start))
             iteration += 1
+            # break
             
                 
         # after 1 epoch
+        # [1] validate
         validate(model, loss_f, val_loader, epoch) 
-        torch.save({'epoch': iteration,
+        # [2] save ckpt
+        os.makedirs(hparams.output_directory, exist_ok=True)
+        now_ckpt_path = os.path.join(hparams.output_directory, "checkpoint_{}".format(epoch))
+        if os.path.exists(now_ckpt_path):
+            assert False
+        torch.save({'epoch': epoch,
                 'state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict()}, 
-                os.path.join(hparams.output_directory, "checkpoint_{}".format(epoch)))
+                now_ckpt_path)
 
+    print('finished...')
 
 
 

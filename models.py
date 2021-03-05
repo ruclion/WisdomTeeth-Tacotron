@@ -10,7 +10,6 @@ def get_mask_from_lengths(lengths):
     mask = torch.zeros(lengths.shape[0], max_len, device=lengths.device).bool().zero_()
     for idx, l in enumerate(lengths):
         mask[idx][:l] = True
-    print(mask)
     return mask
 
 
@@ -314,7 +313,6 @@ class Decoder(nn.Module):
         self.prenet_dropout_p = hparams.prenet_dropout_p # 0.5, prenet 用的
 
         # stop
-        self.max_decoder_steps = hparams.max_decoder_steps # 1000
         self.gate_threshold = hparams.gate_threshold # 0.5
         
 
@@ -356,6 +354,8 @@ class Decoder(nn.Module):
                                       out_dim=1,
                                       bias=True, 
                                       w_init_gain='sigmoid')
+
+        self.gate_sigmoid = nn.Sigmoid()
 
 
 
@@ -437,6 +437,7 @@ class Decoder(nn.Module):
         # stop
         new_decoder_hidden_context = torch.cat((self.new_decoder_rnn_hidden, new_context), dim=1)
         new_gate_prediction = self.gate_layer(new_decoder_hidden_context)
+        new_gate_prediction = self.gate_sigmoid(new_gate_prediction)
         assert new_gate_prediction.shape[1] == 1
         new_gate_prediction = new_gate_prediction.squeeze(dim=1)
 
@@ -542,10 +543,7 @@ class Decoder(nn.Module):
                 gate_outputs += [gate_output]
                 alignments += [alignment]
 
-                if torch.sigmoid(gate_output.data) > self.gate_threshold:
-                    break
-                elif len(mel_outputs) * self.n_frames_per_step >= self.max_decoder_steps:
-                    assert False
+                if gate_output.data > self.gate_threshold:
                     break
 
                 decoder_input = mel_output

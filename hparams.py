@@ -30,7 +30,6 @@ class hparams:
         prenet_dim=[256, 256]
         prenet_dropout_p = 0.5
 
-        max_decoder_steps=1000
         gate_threshold=0.5
 
         attention_dim=128
@@ -51,10 +50,10 @@ class hparams:
 
 
         # Hyperparameters 
+        batch_size=32
         learning_rate=1e-3
         weight_decay=1e-6
         grad_clip_thresh=1.0
-        batch_size=2
 
 
         output_directory = './ckpt_model'
