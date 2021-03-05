@@ -7,7 +7,7 @@ from hparams import hparams
 
 def get_mask_from_lengths(lengths):
     max_len = torch.max(lengths).item()
-    mask = torch.zeros(lengths.shape[0], max_len).byte().zero_()
+    mask = torch.zeros(lengths.shape[0], max_len, device=lengths.device).byte().zero_()
     for idx, l in enumerate(lengths):
         mask[idx][:l] = 1
     return mask
@@ -60,8 +60,7 @@ class LocationLayer(nn.Module):
 
 
         # Dense
-        # 为甚么这个地方的初始化是 'tanh'? 而不是 'linear'?
-        self.dense = Linear_init(kernel_size, attention_dim, bias=False, w_init_gain='tanh')
+        self.dense = Linear_init(n_filters, attention_dim, bias=False, w_init_gain='tanh')
 
 
 
@@ -342,7 +341,7 @@ class Decoder(nn.Module):
 
         # decoder_rnn
         # 和之前的不一样
-        self.decoder_rnn = nn.LSTMCell(input_size=self.attention_dim + self.final_encoder_output_dim, hidden_size=hparams.decoder_rnn_dim)
+        self.decoder_rnn = nn.LSTMCell(input_size=self.attention_rnn_dim + self.final_encoder_output_dim, hidden_size=hparams.decoder_rnn_dim)
         self.decoder_rnn_drop = nn.Dropout(p=self.decoder_rnn_dropout_p)
 
         # FC
@@ -352,7 +351,7 @@ class Decoder(nn.Module):
                                              bias=True,
                                              w_init_gain='linear')
 
-        self.gate_layer = Linear_init(in_dim=self.decoder_rnn_dim + self.encoder_embedding_dim,
+        self.gate_layer = Linear_init(in_dim=self.decoder_rnn_dim + self.final_encoder_output_dim,
                                       out_dim=1,
                                       bias=True, 
                                       w_init_gain='sigmoid')
@@ -363,7 +362,7 @@ class Decoder(nn.Module):
         B = memory.size(0)
 
         # (B, 80) 只用一帧作为查询
-        decoder_input = torch.zeros((B, self.n_mel_channels), dtype=memory.dtype)
+        decoder_input = torch.zeros((B, self.n_mel_channels), dtype=memory.dtype, device=memory.device)
         return decoder_input
 
         
@@ -374,15 +373,15 @@ class Decoder(nn.Module):
         
 
         # 开始初始化
-        self.attention_rnn_hidden = torch.zeros((B, self.attention_rnn_dim), dtype=memory.dtype)
-        self.attention_rnn_cell = torch.zeros((B, self.attention_rnn_dim), dtype=memory.dtype)
+        self.attention_rnn_hidden = torch.zeros((B, self.attention_rnn_dim), dtype=memory.dtype, device=memory.device)
+        self.attention_rnn_cell = torch.zeros((B, self.attention_rnn_dim), dtype=memory.dtype, device=memory.device)
 
-        self.decoder_rnn_hidden = torch.zeros((B, self.decoder_rnn_dim), dtype=memory.dtype)
-        self.decoder_rnn_cell =torch.zeros((B, self.decoder_rnn_dim), dtype=memory.dtype)
+        self.decoder_rnn_hidden = torch.zeros((B, self.decoder_rnn_dim), dtype=memory.dtype, device=memory.device)
+        self.decoder_rnn_cell =torch.zeros((B, self.decoder_rnn_dim), dtype=memory.dtype, device=memory.device)
 
-        self.attention_weights = torch.zeros((B, Text_length), dtype=memory.dtype)
-        self.attention_weights_cum = torch.zeros((B, Text_length), dtype=memory.dtype)
-        self.context = torch.zeros((B, self.final_encoder_output_dim), dtype=memory.dtype)
+        self.attention_weights = torch.zeros((B, Text_length), dtype=memory.dtype, device=memory.device)
+        self.attention_weights_cum = torch.zeros((B, Text_length), dtype=memory.dtype, device=memory.device)
+        self.context = torch.zeros((B, self.final_encoder_output_dim), dtype=memory.dtype, device=memory.device)
 
 
 
@@ -425,17 +424,18 @@ class Decoder(nn.Module):
 
         decoder_input = torch.cat((self.new_attention_rnn_hidden, new_context), -1)
 
-        self.new_decoder_hidden, self.new_decoder_cell = self.decoder_rnn(decoder_input, (self.decoder_hidden, self.decoder_cell))
-        self.new_decoder_hidden = self.decoder_rnn_drop(self.new_decoder_hidden)
+        self.new_decoder_rnn_hidden, self.new_decoder_rnn_cell = self.decoder_rnn(decoder_input, (self.decoder_rnn_hidden, self.decoder_rnn_cell))
+        self.new_decoder_rnn_hidden = self.decoder_rnn_drop(self.new_decoder_rnn_hidden)
 
-        new_decoder_hidden_context = torch.cat((self.new_decoder_hidden, new_context), dim=1)
+        # mel
+        new_decoder_hidden_context = torch.cat((self.new_decoder_rnn_hidden, new_context), dim=1)
         new_decoder_output = self.linear_projection(new_decoder_hidden_context)
         assert new_decoder_output.shape[1] == 80
 
 
-        # 特别为了 gate-stop 的预测增加了 attention_weights, 防止过早于 mel 谱的 early-stop
-        new_decoder_hidden_context_attention_weights = torch.cat((self.new_decoder_hidden, new_context, new_attention_weights), dim=1)
-        new_gate_prediction = self.gate_layer(new_decoder_hidden_context_attention_weights)
+        # stop
+        new_decoder_hidden_context = torch.cat((self.new_decoder_rnn_hidden, new_context), dim=1)
+        new_gate_prediction = self.gate_layer(new_decoder_hidden_context)
         assert new_gate_prediction.shape[1] == 1
         new_gate_prediction = new_gate_prediction.squeeze(dim=1)
 
@@ -445,7 +445,7 @@ class Decoder(nn.Module):
         self.attention_rnn_cell = self.new_attention_rnn_cell
 
         # [2]
-        self.decoder_rnn_hidden = self.new_decoder_hidden
+        self.decoder_rnn_hidden = self.new_decoder_rnn_hidden
         self.decoder_rnn_cell = self.new_decoder_rnn_cell
 
         # [3]
