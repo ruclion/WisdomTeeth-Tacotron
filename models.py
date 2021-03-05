@@ -7,9 +7,10 @@ from hparams import hparams
 
 def get_mask_from_lengths(lengths):
     max_len = torch.max(lengths).item()
-    mask = torch.zeros(lengths.shape[0], max_len, device=lengths.device).byte().zero_()
+    mask = torch.zeros(lengths.shape[0], max_len, device=lengths.device).bool().zero_()
     for idx, l in enumerate(lengths):
-        mask[idx][:l] = 1
+        mask[idx][:l] = True
+    print(mask)
     return mask
 
 
@@ -198,7 +199,7 @@ class Postnet(nn.Module):
         self.convolution_list = nn.ModuleList()
 
 
-        for i in range(0, hparams.self.postnet_num_convolutions - 1):
+        for i in range(0, self.postnet_num_convolutions - 1):
             self.convolution_list.append(
                 nn.Sequential(
                     Conv1d_init(in_channels=self.postnet_embedding_dim_in[i],
@@ -208,9 +209,11 @@ class Postnet(nn.Module):
                                 padding=int((self.postnet_kernel_size - 1) / 2),
                                 bias=True,
                                 w_init_gain='tanh'),
-                    nn.BatchNorm1d(self.postnet_embedding_dim_out[i])),
+                    nn.BatchNorm1d(self.postnet_embedding_dim_out[i]),
                     nn.Tanh(),
                     nn.Dropout(p=self.postnet_dropout_p),
+                    ),
+                    
             )
 
         self.convolution_list.append(
@@ -222,8 +225,6 @@ class Postnet(nn.Module):
                                 padding=int((self.postnet_kernel_size - 1) / 2),
                                 bias=True,
                                 w_init_gain='linear'),
-                    # nn.BatchNorm1d(self.postnet_embedding_dim_out[i])),
-                    # nn.Tanh(),
                     nn.Dropout(p=self.postnet_dropout_p),
                 )
         )
@@ -451,7 +452,7 @@ class Decoder(nn.Module):
         # [3]
         self.context = new_context
         self.attention_weights = new_attention_weights
-        self.attention_weights_cum += new_context
+        self.attention_weights_cum += new_attention_weights
 
         return new_decoder_output, new_gate_prediction, new_attention_weights
 
@@ -609,6 +610,7 @@ class Tacotron2(nn.Module):
         encoder_outputs = self.encoder_module(x=embedded_inputs)
 
 
+
         # decoder - module
         # [1] 输入
         # encoder_outputs 已经在 LSTM 时修正 -> (B, Text_length, 512)
@@ -620,8 +622,9 @@ class Tacotron2(nn.Module):
         # alignments_pre, (B, output_length, max_Text_length)
         # [3] 训练或者预测:
         mels_pre, gates_pre, alignments_pre = self.decoder_module(memory=encoder_outputs, decoder_inputs=mel_padded, memory_lengths=text_lengths)
-
         
+
+
         # postnet - module
         # (B, 80, output_length) -> (B, 80, output_length)
         mels_pre_postnet = self.postnet_module(x=mels_pre) + mels_pre

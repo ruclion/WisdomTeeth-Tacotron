@@ -143,8 +143,7 @@ def train_tacotron():
 
             # flow [2]:  predict
             mels_pre, mels_pre_postnet, gates_pre, _alignments_pre = model(text_padded, input_lengths, mel_padded)
-            return
-
+            print('00000000000000')
 
             # flow [3]:  loss
             loss, mel_loss, gate_loss = loss_f(mels_pre, mels_pre_postnet, gates_pre, mel_padded, gate_padded)
