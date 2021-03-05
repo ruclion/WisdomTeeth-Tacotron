@@ -50,7 +50,7 @@ class hparams:
 
 
         # Hyperparameters 
-        batch_size=48
+        batch_size=32
         learning_rate=1e-3
         weight_decay=1e-6
         grad_clip_thresh=1.0
@@ -59,10 +59,10 @@ class hparams:
         output_directory = './ckpt_model'
         log_directory = './log_dir'
         inference_directory = './infer_eval_dir'
-        checkpoint_path = None
+        checkpoint_path = 'ckpt_model/checkpoint_0'
 
 
-        epochs=1
+        epochs=5000
         seed=4321 
         mel_training_files='./preprocess_dataset/training_data/train.txt'
         mel_validation_files='./preprocess_dataset/training_data/val.txt'

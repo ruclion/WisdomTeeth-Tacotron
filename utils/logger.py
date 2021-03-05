@@ -1,9 +1,10 @@
+import os
 import random
 import torch
 from torch.utils.tensorboard import SummaryWriter
-from plotting_utils import plot_alignment_to_numpy, plot_spectrogram_to_numpy
-from plotting_utils import plot_gate_outputs_to_numpy
-
+from utils.plotting_utils import plot_alignment_to_numpy, plot_spectrogram_to_numpy
+from utils.plotting_utils import plot_gate_outputs_to_numpy
+from preprocess_dataset.gl import write_wav, mel2wav
 
 class Tacotron2Logger(SummaryWriter):
     def __init__(self, logdir):
@@ -37,11 +38,11 @@ class Tacotron2Logger(SummaryWriter):
             iteration, dataformats='HWC')
         self.add_image(
             "mel_target",
-            plot_spectrogram_to_numpy(mel_targets[idx].data.cpu().numpy()),
+            plot_spectrogram_to_numpy(mel_targets[idx].data.cpu().numpy().T),
             iteration, dataformats='HWC')
         self.add_image(
             "mel_predicted",
-            plot_spectrogram_to_numpy(mel_outputs[idx].data.cpu().numpy()),
+            plot_spectrogram_to_numpy(mel_outputs[idx].data.cpu().numpy().T),
             iteration, dataformats='HWC')
         self.add_image(
             "gate",
@@ -49,3 +50,7 @@ class Tacotron2Logger(SummaryWriter):
                 gate_targets[idx].data.cpu().numpy(),
                 torch.sigmoid(gate_outputs[idx]).data.cpu().numpy()),
             iteration, dataformats='HWC')
+
+        os.makedirs('log_wavs', exist_ok=True)
+        _wav_pre = mel2wav(mel_outputs[idx].data.cpu().numpy(), wav_name_path=os.path.join('log_wavs', str(iteration) + '_pre.wav'))
+        _wav_target = mel2wav(mel_targets[idx].data.cpu().numpy(), wav_name_path=os.path.join('log_wavs', str(iteration) + '_target.wav'))

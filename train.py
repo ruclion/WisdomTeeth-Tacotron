@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader
 from hparams import hparams
 from models import Tacotron2
 from dataset import TextMelDataset, TextMelCollate
+from utils.logger import Tacotron2Logger
 
 
 
@@ -15,6 +16,7 @@ from dataset import TextMelDataset, TextMelCollate
 device = 'cuda'
 torch.manual_seed(hparams.seed)
 torch.cuda.manual_seed(hparams.seed)
+good_logger = Tacotron2Logger(hparams.log_directory)
 
 
 
@@ -35,7 +37,7 @@ class Tacotron2Loss(nn.Module):
 
 
 
-def validate(model, loss_f, val_loader, epoch):
+def validate(model, loss_f, val_loader, epoch, iteration):
     model.eval()
     with torch.no_grad():
         val_loss = 0.0
@@ -43,7 +45,7 @@ def validate(model, loss_f, val_loader, epoch):
         val_gate_loss = 0.0
         num = len(val_loader)
 
-        for _i, batch in enumerate(val_loader):
+        for i, batch in enumerate(val_loader):
             # flow [1]:  data to 'cuda'
             text_padded, input_lengths, mel_padded, gate_padded, _output_lengths = batch
             mel_padded = mel_padded.transpose(1, 2) # 修正为 (B, T_out, 80)
@@ -55,7 +57,7 @@ def validate(model, loss_f, val_loader, epoch):
 
 
             # flow [2]:  predict
-            mels_pre, mels_pre_postnet, gates_pre, _alignments_pre = model(text_padded, input_lengths, mel_padded)
+            mels_pre, mels_pre_postnet, gates_pre, alignments_pre = model(text_padded, input_lengths, mel_padded)
 
 
             # flow [3]:  loss
@@ -69,16 +71,28 @@ def validate(model, loss_f, val_loader, epoch):
             val_loss += reduced_loss
             val_mel_loss += reduced_mel_loss
             val_gate_loss += reduced_gate_loss
+            
+
+
+            # 最后一 batch, 总结
+            if i == num - 1:
+                val_loss = val_loss / num
+                val_mel_loss = val_mel_loss / num
+                val_gate_loss = val_gate_loss / num
+                print("Validation loss {}: {:9f} mel {:9f} gate {:9f}  ".format(epoch, val_loss, val_mel_loss, val_gate_loss))
+                good_logger.log_validation(reduced_loss=val_loss,
+                                           reduced_mel_loss=val_mel_loss,
+                                           reduced_gate_loss=val_gate_loss,
+                                           model=model,
+                                           mel_outputs=mels_pre_postnet,
+                                           gate_outputs=gates_pre,
+                                           alignments=alignments_pre,
+                                           mel_targets=mel_padded,
+                                           gate_targets=gate_padded,
+                                           iteration=iteration,
+                                           )
             # break
 
-
-
-        val_loss = val_loss / num
-        val_mel_loss = val_mel_loss / num
-        val_gate_loss = val_gate_loss / num
-
-
-    print("Validation loss {}: {:9f} mel {:9f} gate {:9f}  ".format(epoch, val_loss, val_mel_loss, val_gate_loss))
 
     model.train()
     return
@@ -117,14 +131,16 @@ def train_tacotron():
         optimizer.load_state_dict(checkpoint_dict['optimizer_state_dict'])
         aready_epoch = checkpoint_dict['epoch']
     else:
-        aready_epoch = 0
+        aready_epoch = -1
             
+    print('aready_epoch:', aready_epoch)
+    start_epoch = aready_epoch + 1
 
     
     # iteration
     model.train()
     iteration = 0
-    for epoch in range(aready_epoch, hparams.epochs):
+    for epoch in range(start_epoch, hparams.epochs):
         print("Epoch: {}".format(epoch))
         for _i, batch in enumerate(train_loader):
             # time
@@ -165,13 +181,21 @@ def train_tacotron():
 
             # logs
             print("Train loss {} {:.6f} mel {:.6f} gate {:.6f} Grad Norm {:.6f} {:.2f}s/it".format(iteration, reduced_loss, _reduced_mel_loss, _reduced_gate_loss, grad_norm, time.perf_counter() - start))
+            if iteration % 10 == 0:
+                good_logger.log_training(reduced_loss=reduced_loss,
+                                         reduced_mel_loss=_reduced_mel_loss,
+                                         reduced_gate_loss=_reduced_gate_loss,
+                                         grad_norm=grad_norm,
+                                         learning_rate=optimizer.param_groups[0]['lr'],
+                                         duration=time.perf_counter() - start,
+                                         iteration=iteration)
             iteration += 1
             # break
             
                 
         # after 1 epoch
         # [1] validate
-        validate(model, loss_f, val_loader, epoch) 
+        validate(model, loss_f, val_loader, epoch, iteration) 
         # [2] save ckpt
         os.makedirs(hparams.output_directory, exist_ok=True)
         now_ckpt_path = os.path.join(hparams.output_directory, "checkpoint_{}".format(epoch))

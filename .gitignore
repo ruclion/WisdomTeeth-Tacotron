@@ -1,2 +1,5 @@
 preprocess_dataset/training_data/
 *__pycache__*
+ckpt_model/
+log_wavs/
+log_dir/
